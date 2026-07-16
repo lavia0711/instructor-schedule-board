@@ -21,6 +21,7 @@ export type Schedule = {
   status: ScheduleStatus;
   note?: string;
   parentScheduleId?: string;
+  assistantRequired: boolean;
   arrivalMinutes: number;
   source: "sample" | "manual" | "excel";
   modifiedAt: string;

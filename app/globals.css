@@ -1037,6 +1037,8 @@ button {
 
 .bulk-selection-actions {
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .bulk-selection-actions .secondary-button:disabled {
@@ -1201,6 +1203,12 @@ button {
   text-decoration: line-through;
 }
 
+.fc .fc-event.bulk-selected-schedule {
+  outline: 3px solid #1e293b;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.9);
+}
+
 .calendar-event-content {
   display: flex;
   width: 100%;
@@ -1234,6 +1242,10 @@ button {
 
 .event-status-badge {
   letter-spacing: 0.02em;
+}
+
+.event-assistant-badge {
+  letter-spacing: -0.01em;
 }
 
 .calendar-event-content .event-time {
@@ -1479,6 +1491,87 @@ button {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.assistant-requirement-panel {
+  display: grid;
+  gap: 13px;
+  padding: 15px 16px;
+  background: #fff8f2;
+  border: 1px solid #f4d5bd;
+  border-radius: 13px;
+}
+
+.assistant-requirement-heading,
+.assistant-requirement-heading > div,
+.assistant-requirement-heading > div > span {
+  display: flex;
+}
+
+.assistant-requirement-heading {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.assistant-requirement-heading > div {
+  align-items: flex-start;
+  gap: 9px;
+  color: #b45309;
+}
+
+.assistant-requirement-heading > div > span {
+  flex-direction: column;
+  gap: 3px;
+}
+
+.assistant-requirement-heading strong {
+  color: #263249;
+  font-size: 15px;
+}
+
+.assistant-requirement-heading small {
+  max-width: 420px;
+  color: #7c6c61;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.assistant-requirement-heading > b {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.assistant-requirement-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.assistant-requirement-actions button {
+  min-height: 42px;
+  color: #667287;
+  font-weight: 800;
+  font-size: 14px;
+  background: #fff;
+  border: 1px solid #ddd4cc;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.assistant-requirement-actions button.active {
+  color: #fff;
+  background: #d76722;
+  border-color: #d76722;
+}
+
+.assistant-requirement-actions button:disabled {
+  cursor: default;
+  opacity: 0.65;
 }
 
 .parent-lecture-panel {

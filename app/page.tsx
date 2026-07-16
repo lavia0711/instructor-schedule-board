@@ -60,6 +60,12 @@ import type {
   UserProfile,
 } from "@/lib/schedule-types";
 import {
+  assistantAssignmentStatus,
+  normalizeAssistantRequirement,
+  preserveImportedAssistantRequirement,
+  type AssistantAssignmentStatus,
+} from "@/lib/assistant-assignment";
+import {
   getSupabaseClient,
   isSupabaseConfigured,
 } from "@/lib/supabase/client";
@@ -113,6 +119,19 @@ const STATUS_META: Record<ScheduleStatus, { label: string; color: string }> = {
   pending: { label: "확인 필요", color: "#e58b22" },
   cancelled: { label: "취소", color: "#df4b56" },
 };
+
+const ASSISTANT_ASSIGNMENT_META: Record<
+  AssistantAssignmentStatus,
+  { label: string; color: string }
+> = {
+  unassigned: { label: "보조 미배정", color: "#ea6b27" },
+  assigned: { label: "배정 완료", color: "#16966f" },
+  not_required: { label: "보조 불필요", color: "#64748b" },
+};
+
+const ASSISTANT_ASSIGNMENT_STATUSES = Object.keys(
+  ASSISTANT_ASSIGNMENT_META,
+) as AssistantAssignmentStatus[];
 
 const DEFAULT_KIND_COLORS: Record<ScheduleKind, string> = {
   lecture: KIND_META.lecture.color,
@@ -301,13 +320,20 @@ function classifyImportCandidate(
 
   const exactIdentityMatch = identityMatches[0];
   if (exactIdentityMatch) {
-    const changedFields = changedScheduleFields(exactIdentityMatch, schedule);
+    const nextSchedule = preserveImportedAssistantRequirement(
+      schedule,
+      exactIdentityMatch,
+    );
+    const changedFields = changedScheduleFields(
+      exactIdentityMatch,
+      nextSchedule,
+    );
     if (changedFields.length === 0) {
       return {
         ...context,
         action: "unchanged",
         message: "모든 일정 정보가 동일합니다.",
-        schedule,
+        schedule: nextSchedule,
         matchId: exactIdentityMatch.id,
       };
     }
@@ -324,7 +350,7 @@ function classifyImportCandidate(
       ...context,
       action: "update",
       message: `${detail}${remainder}`,
-      schedule,
+      schedule: nextSchedule,
       matchId: exactIdentityMatch.id,
     };
   }
@@ -341,7 +367,11 @@ function classifyImportCandidate(
     };
   }
   if (slotMatches.length === 1) {
-    const changedFields = changedScheduleFields(slotMatches[0], schedule);
+    const nextSchedule = preserveImportedAssistantRequirement(
+      schedule,
+      slotMatches[0],
+    );
+    const changedFields = changedScheduleFields(slotMatches[0], nextSchedule);
     const detail = changedFields
       .slice(0, 3)
       .map(
@@ -355,7 +385,7 @@ function classifyImportCandidate(
       ...context,
       action: "update",
       message: `${detail || "일정 정보가 변경됩니다."}${remainder}`,
-      schedule,
+      schedule: nextSchedule,
       matchId: slotMatches[0].id,
     };
   }
@@ -363,7 +393,7 @@ function classifyImportCandidate(
     ...context,
     action: "new",
     message: "새 일정으로 등록합니다.",
-    schedule,
+    schedule: preserveImportedAssistantRequirement(schedule),
   };
 }
 
@@ -478,6 +508,7 @@ function emptySchedule(date = TODAY, instructor = ""): Schedule {
     session: "오전",
     kind: "lecture",
     status: "confirmed",
+    assistantRequired: true,
     arrivalMinutes: 30,
     source: "manual",
     modifiedAt: new Date().toISOString(),
@@ -516,10 +547,16 @@ export default function Home() {
     "pending",
     "cancelled",
   ]);
+  const [assistantFilters, setAssistantFilters] = useState<
+    AssistantAssignmentStatus[]
+  >([...ASSISTANT_ASSIGNMENT_STATUSES]);
   const [editorSchedule, setEditorSchedule] = useState<Schedule | null>(null);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isBulkSelectionMode, setIsBulkSelectionMode] = useState(false);
   const [bulkSelectedDates, setBulkSelectedDates] = useState<string[]>([]);
+  const [bulkSelectedScheduleIds, setBulkSelectedScheduleIds] = useState<
+    string[]
+  >([]);
   const [bulkEditorDates, setBulkEditorDates] = useState<string[] | null>(null);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importYear, setImportYear] = useState(new Date().getFullYear());
@@ -585,6 +622,7 @@ export default function Home() {
           setSchedules(
             (Array.isArray(savedSchedules) ? savedSchedules : [])
               .filter((schedule) => schedule.source !== "sample")
+              .map(normalizeAssistantRequirement),
           );
         } catch {
           setSchedules([]);
@@ -854,7 +892,8 @@ export default function Home() {
     }
   }
 
-  const { filteredSchedules, kindCounts, statusCounts } = useMemo(() => {
+  const { filteredSchedules, kindCounts, statusCounts, assistantCounts } =
+    useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase("ko-KR");
     const instructorAndSearchSchedules = schedules.filter((schedule) => {
       if (instructorFilter !== "all" && schedule.instructor !== instructorFilter) {
@@ -873,17 +912,36 @@ export default function Home() {
         .toLocaleLowerCase("ko-KR")
         .includes(query);
     });
-    const kindCountSource = instructorAndSearchSchedules.filter((schedule) =>
-      statusFilters.includes(schedule.status),
+    const passesAssistantFilter = (schedule: Schedule) => {
+      if (
+        assistantFilters.length === ASSISTANT_ASSIGNMENT_STATUSES.length
+      ) {
+        return true;
+      }
+      const assignment = assistantAssignmentStatus(schedule, schedules);
+      return assignment !== null && assistantFilters.includes(assignment);
+    };
+    const kindCountSource = instructorAndSearchSchedules.filter(
+      (schedule) =>
+        statusFilters.includes(schedule.status) &&
+        passesAssistantFilter(schedule),
     );
-    const statusCountSource = instructorAndSearchSchedules.filter((schedule) =>
-      kindFilters.includes(schedule.kind),
+    const statusCountSource = instructorAndSearchSchedules.filter(
+      (schedule) =>
+        kindFilters.includes(schedule.kind) &&
+        passesAssistantFilter(schedule),
+    );
+    const assistantCountSource = instructorAndSearchSchedules.filter(
+      (schedule) =>
+        kindFilters.includes(schedule.kind) &&
+        statusFilters.includes(schedule.status),
     );
     return {
       filteredSchedules: instructorAndSearchSchedules.filter(
         (schedule) =>
           kindFilters.includes(schedule.kind) &&
-          statusFilters.includes(schedule.status),
+          statusFilters.includes(schedule.status) &&
+          passesAssistantFilter(schedule),
       ),
       kindCounts: Object.fromEntries(
         (Object.keys(KIND_META) as ScheduleKind[]).map((kind) => [
@@ -898,14 +956,31 @@ export default function Home() {
             .length,
         ]),
       ) as Record<ScheduleStatus, number>,
+      assistantCounts: Object.fromEntries(
+        ASSISTANT_ASSIGNMENT_STATUSES.map((status) => [
+          status,
+          assistantCountSource.filter(
+            (schedule) =>
+              assistantAssignmentStatus(schedule, schedules) === status,
+          ).length,
+        ]),
+      ) as Record<AssistantAssignmentStatus, number>,
     };
-  }, [instructorFilter, kindFilters, schedules, searchQuery, statusFilters]);
+  }, [
+    assistantFilters,
+    instructorFilter,
+    kindFilters,
+    schedules,
+    searchQuery,
+    statusFilters,
+  ]);
 
   const calendarEvents = useMemo<EventInput[]>(
     () =>
       filteredSchedules.map((schedule) => {
         const meta = KIND_META[schedule.kind];
         const isAllDay = !schedule.startTime || !schedule.endTime;
+        const assistantStatus = assistantAssignmentStatus(schedule, schedules);
         return {
           id: schedule.id,
           title: [
@@ -930,20 +1005,26 @@ export default function Home() {
           classNames: [
             `schedule-${schedule.kind}`,
             `schedule-${schedule.status}`,
+            ...(bulkSelectedScheduleIds.includes(schedule.id)
+              ? ["bulk-selected-schedule"]
+              : []),
           ],
           extendedProps: {
             schedule,
             kindColor: kindColors[schedule.kind],
+            assistantStatus,
           },
         };
       }),
     [
       activeInstructor,
+      bulkSelectedScheduleIds,
       filteredSchedules,
       instructorColors,
       instructors,
       isAdmin,
       kindColors,
+      schedules,
     ],
   );
 
@@ -1005,6 +1086,7 @@ export default function Home() {
     );
     setIsBulkSelectionMode(false);
     setBulkSelectedDates([]);
+    setBulkSelectedScheduleIds([]);
     setBulkEditorDates(null);
     setIsEditorOpen(true);
   }
@@ -1020,6 +1102,7 @@ export default function Home() {
   function toggleBulkSelectionMode() {
     if (isBulkSelectionMode) {
       setBulkSelectedDates([]);
+      setBulkSelectedScheduleIds([]);
       setIsBulkSelectionMode(false);
       return;
     }
@@ -1040,7 +1123,19 @@ export default function Home() {
     const schedule = schedules.find((item) => item.id === info.event.id);
     if (!schedule) return;
     if (isBulkSelectionMode) {
-      toggleBulkDate(schedule.date);
+      if (
+        schedule.kind === "lecture" &&
+        schedule.status !== "cancelled" &&
+        canEdit(schedule)
+      ) {
+        setBulkSelectedScheduleIds((current) =>
+          current.includes(schedule.id)
+            ? current.filter((item) => item !== schedule.id)
+            : [...current, schedule.id],
+        );
+      } else {
+        toggleBulkDate(schedule.date);
+      }
       return;
     }
     setEditorSchedule(schedule);
@@ -1075,6 +1170,8 @@ export default function Home() {
       ...schedule,
       id: schedule.id || crypto.randomUUID(),
       session: schedule.session || deriveSession(schedule.startTime),
+      assistantRequired:
+        schedule.kind === "lecture" && schedule.assistantRequired,
       modifiedAt: new Date().toISOString(),
     };
 
@@ -1144,6 +1241,7 @@ export default function Home() {
             topic: parentLecture.topic,
             status: parentLecture.status,
             parentScheduleId: parentLecture.id,
+            assistantRequired: false,
             modifiedAt: new Date().toISOString(),
           }
         : {
@@ -1152,6 +1250,8 @@ export default function Home() {
             date,
             parentScheduleId: undefined,
             session: template.session || deriveSession(template.startTime),
+            assistantRequired:
+              template.kind === "lecture" && template.assistantRequired,
             modifiedAt: new Date().toISOString(),
           };
       return [nextSchedule];
@@ -1184,7 +1284,57 @@ export default function Home() {
     setIsEditorOpen(false);
     setBulkEditorDates(null);
     setBulkSelectedDates([]);
+    setBulkSelectedScheduleIds([]);
     setIsBulkSelectionMode(false);
+  }
+
+  async function updateBulkAssistantRequirement(required: boolean) {
+    const updates = schedules
+      .filter(
+        (schedule) =>
+          bulkSelectedScheduleIds.includes(schedule.id) &&
+          schedule.kind === "lecture" &&
+          schedule.status !== "cancelled" &&
+          canEdit(schedule),
+      )
+      .map((schedule) => ({
+        ...schedule,
+        assistantRequired: required,
+        modifiedAt: new Date().toISOString(),
+      }));
+    if (updates.length === 0) return;
+
+    if (isSupabaseConfigured) {
+      setIsSyncing(true);
+      try {
+        const saved = await saveRemoteSchedules(updates);
+        const savedById = new Map(saved.map((schedule) => [schedule.id, schedule]));
+        setSchedules((items) =>
+          items.map((item) => savedById.get(item.id) || item),
+        );
+        setSyncMessage(
+          `${saved.length}개 본강의를 ${
+            required ? "보조 필요" : "보조 불필요"
+          }로 변경했습니다.`,
+        );
+      } catch (error) {
+        showSyncError(error, "보조강사 상태를 일괄 변경하지 못했습니다.");
+        setIsSyncing(false);
+        return;
+      }
+      setIsSyncing(false);
+    } else {
+      const updateIds = new Set(updates.map((schedule) => schedule.id));
+      const updatesById = new Map(
+        updates.map((schedule) => [schedule.id, schedule]),
+      );
+      setSchedules((items) =>
+        items.map((item) =>
+          updateIds.has(item.id) ? updatesById.get(item.id) || item : item,
+        ),
+      );
+    }
+    setBulkSelectedScheduleIds([]);
   }
 
   async function deleteSchedule(schedule: Schedule) {
@@ -1340,6 +1490,7 @@ export default function Home() {
             kind: importedKind,
             status: cancelled ? "cancelled" : pending ? "pending" : "confirmed",
             note: sourceNote || undefined,
+            assistantRequired: importedKind === "lecture",
             arrivalMinutes: timeRange ? 30 : 0,
             source: "excel",
             modifiedAt: new Date().toISOString(),
@@ -1379,12 +1530,19 @@ export default function Home() {
     setImportCandidates((current) =>
       current.map((candidate) => {
         if (!candidate.schedule) return candidate;
+        const kind = classifyExcelKind(
+          candidate.schedule.topic || "",
+          normalizedKeywords,
+        );
         const schedule = {
           ...candidate.schedule,
-          kind: classifyExcelKind(
-            candidate.schedule.topic || "",
-            normalizedKeywords,
-          ),
+          kind,
+          assistantRequired:
+            kind === "lecture"
+              ? candidate.schedule.kind === "lecture"
+                ? candidate.schedule.assistantRequired
+                : true
+              : false,
         };
         return classifyImportCandidate(
           schedule,
@@ -1514,6 +1672,14 @@ export default function Home() {
 
   function toggleStatus(status: ScheduleStatus) {
     setStatusFilters((current) =>
+      current.includes(status)
+        ? current.filter((item) => item !== status)
+        : [...current, status],
+    );
+  }
+
+  function toggleAssistantFilter(status: AssistantAssignmentStatus) {
+    setAssistantFilters((current) =>
       current.includes(status)
         ? current.filter((item) => item !== status)
         : [...current, status],
@@ -1810,6 +1976,65 @@ export default function Home() {
           </small>
         </section>
 
+        <section className="filter-section">
+          <div className="section-label with-actions">
+            <span className="section-label-title">
+              <Link2 size={15} />
+              보조강사
+            </span>
+            <span className="filter-bulk-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  setAssistantFilters(
+                    assistantFilters.length ===
+                      ASSISTANT_ASSIGNMENT_STATUSES.length
+                      ? []
+                      : [...ASSISTANT_ASSIGNMENT_STATUSES],
+                  )
+                }
+              >
+                {assistantFilters.length ===
+                ASSISTANT_ASSIGNMENT_STATUSES.length
+                  ? "전체 해제"
+                  : "전체 선택"}
+              </button>
+            </span>
+          </div>
+          <div className="status-filter-list">
+            {ASSISTANT_ASSIGNMENT_STATUSES.map((status) => {
+              const meta = ASSISTANT_ASSIGNMENT_META[status];
+              const checked = assistantFilters.includes(status);
+              return (
+                <label className="filter-check" key={status}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleAssistantFilter(status)}
+                  />
+                  <span
+                    className="check-box"
+                    style={{
+                      background: checked ? meta.color : "transparent",
+                      borderColor: checked ? meta.color : "#cbd5e1",
+                    }}
+                  >
+                    {checked && <Check size={12} />}
+                  </span>
+                  <span className="kind-dot" style={{ background: meta.color }} />
+                  {meta.label}
+                  <span className="filter-count">
+                    {assistantCounts[status]}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <small className="status-filter-help">
+            취소되지 않은 연결 보조강의가 한 건 이상이면 배정 완료입니다.
+          </small>
+        </section>
+
         <section className="today-card">
           <span className="eyebrow">오늘의 일정</span>
           <strong>{todaySchedules.length}건</strong>
@@ -2003,7 +2228,7 @@ export default function Home() {
                 onClick={toggleBulkSelectionMode}
               >
                 <ListPlus size={17} />
-                {isBulkSelectionMode ? "선택 모드 종료" : "여러 날짜 선택"}
+                {isBulkSelectionMode ? "선택 모드 종료" : "여러 항목 선택"}
               </button>
               <button
                 className="excel-button"
@@ -2022,17 +2247,42 @@ export default function Home() {
               <div>
                 <ListPlus size={19} />
                 <p>
-                  <strong>{bulkSelectedDates.length}개 날짜 선택됨</strong>
-                  <span>달력의 날짜를 눌러 선택하거나 다시 눌러 해제하세요.</span>
+                  <strong>
+                    {bulkSelectedDates.length}개 날짜 ·{" "}
+                    {bulkSelectedScheduleIds.length}개 본강의 선택
+                  </strong>
+                  <span>
+                    빈 날짜는 일괄 등록, 본강의 일정은 보조 상태 변경에 사용합니다.
+                  </span>
                 </p>
               </div>
               <div className="bulk-selection-actions">
                 <button
                   className="secondary-button"
-                  disabled={bulkSelectedDates.length === 0}
-                  onClick={() => setBulkSelectedDates([])}
+                  disabled={
+                    bulkSelectedDates.length === 0 &&
+                    bulkSelectedScheduleIds.length === 0
+                  }
+                  onClick={() => {
+                    setBulkSelectedDates([]);
+                    setBulkSelectedScheduleIds([]);
+                  }}
                 >
                   선택 해제
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={bulkSelectedScheduleIds.length === 0}
+                  onClick={() => void updateBulkAssistantRequirement(true)}
+                >
+                  보조 필요
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={bulkSelectedScheduleIds.length === 0}
+                  onClick={() => void updateBulkAssistantRequirement(false)}
+                >
+                  보조 불필요
                 </button>
                 <button
                   className="primary-button"
@@ -2126,6 +2376,8 @@ export default function Home() {
               eventContent={(content: EventContentArg) => {
                 const schedule = content.event.extendedProps.schedule as Schedule;
                 const kindColor = content.event.extendedProps.kindColor as string;
+                const assistantStatus = content.event.extendedProps
+                  .assistantStatus as AssistantAssignmentStatus | null;
                 const meta = KIND_META[schedule.kind];
                 const eventColor = instructorColor(
                   schedule.instructor,
@@ -2162,6 +2414,20 @@ export default function Home() {
                         {STATUS_META[schedule.status].label}
                       </span>
                     )}
+                    {(assistantStatus === "unassigned" ||
+                      assistantStatus === "not_required") && (
+                      <span
+                        className="event-kind-badge event-assistant-badge"
+                        style={
+                          {
+                            "--badge-color":
+                              ASSISTANT_ASSIGNMENT_META[assistantStatus].color,
+                          } as React.CSSProperties
+                        }
+                      >
+                        {ASSISTANT_ASSIGNMENT_META[assistantStatus].label}
+                      </span>
+                    )}
                     <b>{schedule.instructor}</b>
                     <span className="event-topic">
                       {schedule.topic || meta.label}
@@ -2192,6 +2458,10 @@ export default function Home() {
           isAdmin={isAdmin}
           editable={canEdit(editorSchedule)}
           currentInstructor={activeInstructor}
+          assistantStatus={assistantAssignmentStatus(
+            { ...editorSchedule, assistantRequired: true },
+            schedules,
+          )}
           onClose={() => setIsEditorOpen(false)}
           onSave={saveSchedule}
           onBulkSave={saveBulkSchedules}
@@ -2570,6 +2840,7 @@ function ScheduleEditor({
   isAdmin,
   editable,
   currentInstructor,
+  assistantStatus,
   onClose,
   onSave,
   onBulkSave,
@@ -2583,6 +2854,7 @@ function ScheduleEditor({
   isAdmin: boolean;
   editable: boolean;
   currentInstructor?: string;
+  assistantStatus: AssistantAssignmentStatus | null;
   onClose: () => void;
   onSave: (schedule: Schedule) => void;
   onBulkSave: (
@@ -2605,6 +2877,12 @@ function ScheduleEditor({
   const isOther = form.kind === "other";
   const isAssistant = form.kind === "assistant";
   const isBulkAssistant = isBulk && isAssistant;
+  const displayedAssistantStatus: AssistantAssignmentStatus =
+    !form.assistantRequired
+      ? "not_required"
+      : assistantStatus === "assigned"
+        ? "assigned"
+        : "unassigned";
   const availableMainLectures = useMemo(
     () =>
       mainLectures.filter(
@@ -2668,6 +2946,12 @@ function ScheduleEditor({
     setForm((current) => ({
       ...current,
       kind,
+      assistantRequired:
+        kind === "lecture"
+          ? current.kind === "lecture"
+            ? current.assistantRequired
+            : true
+          : false,
       ...(kind !== "assistant" ? { parentScheduleId: undefined } : {}),
       ...(kind === "office" ? { region: undefined } : {}),
       ...(kind === "off"
@@ -2708,10 +2992,14 @@ function ScheduleEditor({
   function submit() {
     setAttemptedSave(true);
     if (!canSubmit) return;
-    const normalizedForm =
-      form.kind === "office" || form.kind === "off"
-        ? { ...form, region: undefined }
-        : form;
+    const normalizedForm: Schedule = {
+      ...form,
+      assistantRequired:
+        form.kind === "lecture" && form.assistantRequired,
+      ...(form.kind === "office" || form.kind === "off"
+        ? { region: undefined }
+        : {}),
+    };
     if (isBulk && bulkDates) {
       onBulkSave(normalizedForm, bulkDates, bulkParentScheduleIds);
       return;
@@ -2785,6 +3073,48 @@ function ScheduleEditor({
               })}
             </div>
           </div>
+
+          {form.kind === "lecture" && (
+            <div className="assistant-requirement-panel">
+              <div className="assistant-requirement-heading">
+                <div>
+                  <Link2 size={18} />
+                  <span>
+                    <strong>보조강사</strong>
+                    <small>
+                      필요로 설정하면 연결된 보조강의가 없을 때 미배정으로 표시됩니다.
+                    </small>
+                  </span>
+                </div>
+                <b
+                  style={{
+                    color:
+                      ASSISTANT_ASSIGNMENT_META[displayedAssistantStatus].color,
+                  }}
+                >
+                  {ASSISTANT_ASSIGNMENT_META[displayedAssistantStatus].label}
+                </b>
+              </div>
+              <div className="assistant-requirement-actions">
+                <button
+                  type="button"
+                  disabled={!editable}
+                  className={form.assistantRequired ? "active" : ""}
+                  onClick={() => update("assistantRequired", true)}
+                >
+                  보조 필요
+                </button>
+                <button
+                  type="button"
+                  disabled={!editable}
+                  className={!form.assistantRequired ? "active" : ""}
+                  onClick={() => update("assistantRequired", false)}
+                >
+                  보조 불필요
+                </button>
+              </div>
+            </div>
+          )}
 
           <label className="field full">
             <span>담당 강사</span>

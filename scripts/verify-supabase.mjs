@@ -101,7 +101,12 @@ try {
 
   const ownScheduleId = randomUUID();
   const otherScheduleId = randomUUID();
-  createdScheduleIds.push(ownScheduleId, otherScheduleId);
+  const assistantScheduleId = randomUUID();
+  createdScheduleIds.push(
+    ownScheduleId,
+    otherScheduleId,
+    assistantScheduleId,
+  );
   ensure(
     await adminClient.from("schedules").insert([
       {
@@ -112,6 +117,7 @@ try {
         instructor: instructorName,
         kind: "lecture",
         status: "confirmed",
+        assistant_required: true,
         source: "manual",
       },
       {
@@ -122,6 +128,19 @@ try {
         instructor: otherInstructorName,
         kind: "lecture",
         status: "confirmed",
+        assistant_required: true,
+        source: "manual",
+      },
+      {
+        id: assistantScheduleId,
+        schedule_date: "2026-07-17",
+        start_time: "10:00",
+        end_time: "11:00",
+        instructor: instructorName,
+        kind: "assistant",
+        status: "confirmed",
+        parent_schedule_id: ownScheduleId,
+        assistant_required: false,
         source: "manual",
       },
     ]),
@@ -132,17 +151,46 @@ try {
     await instructorClient.from("schedules").select("id"),
     "instructor schedule read",
   );
-  assert.equal(visibleSchedules.length, 2, "staff should read all schedules");
+  assert.equal(visibleSchedules.length, 3, "staff should read all schedules");
+
+  const invalidAssistantRequirement = await adminClient
+    .from("schedules")
+    .insert({
+      schedule_date: "2026-07-20",
+      instructor: instructorName,
+      kind: "office",
+      status: "confirmed",
+      assistant_required: true,
+      source: "manual",
+    });
+  assert.ok(
+    invalidAssistantRequirement.error,
+    "non-lecture schedules must not require an assistant",
+  );
 
   const ownUpdate = ensure(
     await instructorClient
       .from("schedules")
-      .update({ topic: "본인 일정 수정" })
+      .update({ topic: "본인 일정 수정", assistant_required: false })
       .eq("id", ownScheduleId)
       .select("id"),
     "own schedule update",
   );
   assert.equal(ownUpdate.length, 1, "instructor should update own schedule");
+
+  const updatedRequirement = ensure(
+    await instructorClient
+      .from("schedules")
+      .select("assistant_required")
+      .eq("id", ownScheduleId)
+      .single(),
+    "read updated assistant requirement",
+  );
+  assert.equal(
+    updatedRequirement.assistant_required,
+    false,
+    "assistant requirement should persist",
+  );
 
   const otherUpdate = ensure(
     await instructorClient

@@ -21,6 +21,7 @@ type ScheduleRow = {
   status: Schedule["status"];
   note: string | null;
   parent_schedule_id: string | null;
+  assistant_required: boolean;
   arrival_minutes: number;
   source: "manual" | "excel";
   modified_at: string;
@@ -70,6 +71,7 @@ function fromScheduleRow(row: ScheduleRow): Schedule {
     status: row.status,
     note: row.note || undefined,
     parentScheduleId: row.parent_schedule_id || undefined,
+    assistantRequired: row.kind === "lecture" && row.assistant_required,
     arrivalMinutes: row.arrival_minutes,
     source: row.source,
     modifiedAt: row.modified_at,
@@ -91,6 +93,8 @@ function toScheduleRow(schedule: Schedule) {
     status: schedule.status,
     note: schedule.note?.trim() || null,
     parent_schedule_id: schedule.parentScheduleId || null,
+    assistant_required:
+      schedule.kind === "lecture" && schedule.assistantRequired,
     arrival_minutes: schedule.arrivalMinutes,
     source: schedule.source === "excel" ? "excel" : "manual",
   };
