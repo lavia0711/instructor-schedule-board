@@ -1,0 +1,2725 @@
+"use client";
+
+import FullCalendar from "@fullcalendar/react";
+import dayGridPlugin from "@fullcalendar/daygrid";
+import interactionPlugin, { type DateClickArg } from "@fullcalendar/interaction";
+import timeGridPlugin from "@fullcalendar/timegrid";
+import type {
+  DatesSetArg,
+  EventClickArg,
+  EventContentArg,
+  EventInput,
+} from "@fullcalendar/core";
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  CalendarDays,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  CircleAlert,
+  Clock3,
+  FileSpreadsheet,
+  Filter,
+  GripVertical,
+  Link2,
+  ListPlus,
+  MapPin,
+  Palette,
+  Plus,
+  Search,
+  ShieldCheck,
+  Upload,
+  UserRound,
+  UsersRound,
+  X,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+type ScheduleKind = "lecture" | "assistant" | "office" | "off" | "other";
+type ScheduleStatus = "confirmed" | "pending" | "cancelled";
+type RoleKey = "admin" | `instructor:${string}`;
+type CalendarView = "dayGridMonth" | "timeGridWeek" | "timeGridDay";
+
+type Schedule = {
+  id: string;
+  date: string;
+  startTime?: string;
+  endTime?: string;
+  instructor: string;
+  region?: string;
+  venue?: string;
+  session?: string;
+  topic?: string;
+  kind: ScheduleKind;
+  status: ScheduleStatus;
+  note?: string;
+  parentScheduleId?: string;
+  arrivalMinutes: number;
+  source: "sample" | "manual" | "excel";
+  modifiedAt: string;
+};
+
+type ImportAction = "new" | "update" | "unchanged" | "error";
+
+type ImportCandidate = {
+  key: string;
+  rowNumber: number;
+  sheetName: string;
+  action: ImportAction;
+  message: string;
+  schedule?: Schedule;
+  matchId?: string;
+};
+
+const STORAGE_KEY = "lecture-schedule-prototype-v1";
+const COLOR_STORAGE_KEY = "lecture-schedule-instructor-colors-v1";
+const KIND_COLOR_STORAGE_KEY = "lecture-schedule-kind-colors-v1";
+const INSTRUCTOR_ORDER_STORAGE_KEY = "lecture-schedule-instructor-order-v1";
+const LECTURE_KEYWORDS_STORAGE_KEY = "lecture-schedule-import-keywords-v1";
+const TODAY = isoFromLocalDate(new Date());
+const CORE_INSTRUCTORS = ["문건우", "아이온"] as const;
+const DEFAULT_LECTURE_KEYWORDS = ["제미나이", "클로드"];
+
+const KIND_META: Record<
+  ScheduleKind,
+  { label: string; color: string; soft: string }
+> = {
+  lecture: { label: "본강의", color: "#2563eb", soft: "#eff6ff" },
+  assistant: { label: "보조강의", color: "#8b5cf6", soft: "#f3efff" },
+  office: { label: "사무실 출근", color: "#0f9f88", soft: "#e8faf5" },
+  off: { label: "휴무", color: "#64748b", soft: "#f1f5f9" },
+  other: { label: "기타", color: "#d97706", soft: "#fff7ed" },
+};
+
+const STATUS_META: Record<ScheduleStatus, { label: string; color: string }> = {
+  confirmed: { label: "확정", color: "#1f9d73" },
+  pending: { label: "확인 필요", color: "#e58b22" },
+  cancelled: { label: "취소", color: "#df4b56" },
+};
+
+const DEFAULT_KIND_COLORS: Record<ScheduleKind, string> = {
+  lecture: KIND_META.lecture.color,
+  assistant: KIND_META.assistant.color,
+  office: KIND_META.office.color,
+  off: KIND_META.off.color,
+  other: KIND_META.other.color,
+};
+
+const INSTRUCTOR_COLOR_OVERRIDES: Record<string, string> = {
+  문건우: "#2563eb",
+  아이온: "#7c3aed",
+};
+
+const INSTRUCTOR_COLOR_PALETTE = [
+  "#0369a1",
+  "#4338ca",
+  "#6d28d9",
+  "#a21caf",
+  "#be123c",
+  "#b45309",
+  "#3f6212",
+  "#047857",
+  "#0e7490",
+  "#1d4ed8",
+  "#9f1239",
+  "#92400e",
+];
+
+function instructorColor(
+  instructor: string,
+  customColors?: Record<string, string>,
+) {
+  const normalized = instructor.trim();
+  if (customColors?.[normalized]) {
+    return customColors[normalized];
+  }
+  if (INSTRUCTOR_COLOR_OVERRIDES[normalized]) {
+    return INSTRUCTOR_COLOR_OVERRIDES[normalized];
+  }
+
+  let hash = 0;
+  for (const character of normalized) {
+    hash = (hash * 31 + (character.codePointAt(0) ?? 0)) >>> 0;
+  }
+  return INSTRUCTOR_COLOR_PALETTE[hash % INSTRUCTOR_COLOR_PALETTE.length];
+}
+
+function isoFromLocalDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function currentWeekRange(dateIso: string) {
+  const date = new Date(`${dateIso}T12:00:00`);
+  const sundayOffset = date.getDay();
+  const start = new Date(date);
+  start.setDate(date.getDate() - sundayOffset);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  return { start: isoFromLocalDate(start), end: isoFromLocalDate(end) };
+}
+
+function timeFromLocalDate(date: Date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(
+    date.getMinutes(),
+  ).padStart(2, "0")}`;
+}
+
+function addMinutesToTime(time: string, minutes: number) {
+  const [hour, minute] = time.split(":").map(Number);
+  const total = Math.min(hour * 60 + minute + minutes, 23 * 60 + 30);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(
+    total % 60,
+  ).padStart(2, "0")}`;
+}
+
+function deriveSession(startTime?: string) {
+  if (!startTime) return "종일";
+  const hour = Number(startTime.split(":")[0]);
+  if (hour < 13) return "오전";
+  if (hour < 19) return "오후";
+  return "야간";
+}
+
+function calculateArrival(startTime?: string, minutes = 30) {
+  if (!startTime || minutes === 0) return undefined;
+  const [hour, minute] = startTime.split(":").map(Number);
+  const total = hour * 60 + minute - minutes;
+  const normalized = (total + 24 * 60) % (24 * 60);
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(
+    normalized % 60,
+  ).padStart(2, "0")}`;
+}
+
+function parentLectureLabel(schedule: Schedule) {
+  const time =
+    schedule.startTime && schedule.endTime
+      ? `${schedule.startTime}-${schedule.endTime}`
+      : "시간 미정";
+  const place = [schedule.region, schedule.venue].filter(Boolean).join(" · ");
+  return [
+    schedule.date.replaceAll("-", "."),
+    time,
+    schedule.instructor,
+    schedule.topic || "본강의",
+    place || "지역·장소 미정",
+    schedule.status === "cancelled" ? "취소" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function scheduleIdentityKey(schedule: Schedule) {
+  const untimedSession =
+    schedule.startTime || schedule.endTime
+      ? ""
+      : schedule.session || deriveSession(schedule.startTime);
+  return [
+    schedule.date,
+    schedule.instructor.trim(),
+    schedule.startTime ?? "",
+    schedule.endTime ?? "",
+    untimedSession,
+  ]
+    .join("|")
+    .toLocaleLowerCase("ko-KR");
+}
+
+function scheduleSlotKey(schedule: Schedule) {
+  return [
+    schedule.date,
+    schedule.instructor.trim(),
+    schedule.session || deriveSession(schedule.startTime),
+  ]
+    .join("|")
+    .toLocaleLowerCase("ko-KR");
+}
+
+function changedScheduleFields(previous: Schedule, next: Schedule) {
+  const emptyText = (value?: string) => value?.trim() || "없음";
+  const timeText = (schedule: Schedule) =>
+    schedule.startTime && schedule.endTime
+      ? `${schedule.startTime}-${schedule.endTime}`
+      : "시간 미정";
+  const fields: Array<[string, string, string]> = [
+    ["시간", timeText(previous), timeText(next)],
+    ["지역", emptyText(previous.region), emptyText(next.region)],
+    ["장소", emptyText(previous.venue), emptyText(next.venue)],
+    ["시간대", emptyText(previous.session), emptyText(next.session)],
+    ["강의명·내용", emptyText(previous.topic), emptyText(next.topic)],
+    ["일정 종류", KIND_META[previous.kind].label, KIND_META[next.kind].label],
+    ["상태", STATUS_META[previous.status].label, STATUS_META[next.status].label],
+    ["메모", emptyText(previous.note), emptyText(next.note)],
+    [
+      "도착 준비 시간",
+      previous.arrivalMinutes ? `${previous.arrivalMinutes}분 전` : "설정 안 함",
+      next.arrivalMinutes ? `${next.arrivalMinutes}분 전` : "설정 안 함",
+    ],
+  ];
+  return fields
+    .filter(([, previousValue, nextValue]) => previousValue !== nextValue)
+    .map(([label, previousValue, nextValue]) => ({
+      label,
+      previousValue,
+      nextValue,
+    }));
+}
+
+function classifyImportCandidate(
+  schedule: Schedule,
+  existingSchedules: Schedule[],
+  context: Pick<ImportCandidate, "key" | "rowNumber" | "sheetName">,
+): ImportCandidate {
+  const identityMatches = existingSchedules.filter(
+    (item) => scheduleIdentityKey(item) === scheduleIdentityKey(schedule),
+  );
+
+  if (identityMatches.length > 1) {
+    return {
+      ...context,
+      action: "error",
+      message: "같은 날짜·강사·시간 일정이 여러 건이라 먼저 중복 정리가 필요합니다.",
+      schedule,
+    };
+  }
+
+  const exactIdentityMatch = identityMatches[0];
+  if (exactIdentityMatch) {
+    const changedFields = changedScheduleFields(exactIdentityMatch, schedule);
+    if (changedFields.length === 0) {
+      return {
+        ...context,
+        action: "unchanged",
+        message: "모든 일정 정보가 동일합니다.",
+        schedule,
+        matchId: exactIdentityMatch.id,
+      };
+    }
+    const detail = changedFields
+      .slice(0, 3)
+      .map(
+        ({ label, previousValue, nextValue }) =>
+          `${label}: ${previousValue} → ${nextValue}`,
+      )
+      .join(" · ");
+    const remainder =
+      changedFields.length > 3 ? ` 외 ${changedFields.length - 3}개` : "";
+    return {
+      ...context,
+      action: "update",
+      message: `${detail}${remainder}`,
+      schedule,
+      matchId: exactIdentityMatch.id,
+    };
+  }
+
+  const slotMatches = existingSchedules.filter(
+    (item) => scheduleSlotKey(item) === scheduleSlotKey(schedule),
+  );
+  if (slotMatches.length > 1) {
+    return {
+      ...context,
+      action: "error",
+      message: "같은 시간대 일정이 여러 건이라 자동 판단할 수 없습니다.",
+      schedule,
+    };
+  }
+  if (slotMatches.length === 1) {
+    const changedFields = changedScheduleFields(slotMatches[0], schedule);
+    const detail = changedFields
+      .slice(0, 3)
+      .map(
+        ({ label, previousValue, nextValue }) =>
+          `${label}: ${previousValue} → ${nextValue}`,
+      )
+      .join(" · ");
+    const remainder =
+      changedFields.length > 3 ? ` 외 ${changedFields.length - 3}개` : "";
+    return {
+      ...context,
+      action: "update",
+      message: `${detail || "일정 정보가 변경됩니다."}${remainder}`,
+      schedule,
+      matchId: slotMatches[0].id,
+    };
+  }
+  return {
+    ...context,
+    action: "new",
+    message: "새 일정으로 등록합니다.",
+    schedule,
+  };
+}
+
+function roleInstructor(roleKey: RoleKey) {
+  return roleKey.startsWith("instructor:")
+    ? roleKey.replace("instructor:", "")
+    : undefined;
+}
+
+function readCellText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value).trim();
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") return record.text.trim();
+    if (typeof record.result === "string" || typeof record.result === "number") {
+      return String(record.result).trim();
+    }
+    if (Array.isArray(record.richText)) {
+      return record.richText
+        .map((part) => {
+          if (typeof part === "object" && part && "text" in part) {
+            return String((part as { text: unknown }).text);
+          }
+          return "";
+        })
+        .join("")
+        .trim();
+    }
+  }
+  return String(value).trim();
+}
+
+function normalizeLectureKeywords(value: unknown) {
+  if (!Array.isArray(value)) return [...DEFAULT_LECTURE_KEYWORDS];
+  return Array.from(
+    new Set(
+      value
+        .filter((keyword): keyword is string => typeof keyword === "string")
+        .map((keyword) => keyword.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function classifyExcelKind(remark: string, lectureKeywords: string[]) {
+  const normalizedRemark = remark.toLocaleLowerCase("ko-KR");
+  return lectureKeywords.some((keyword) =>
+    normalizedRemark.includes(keyword.toLocaleLowerCase("ko-KR")),
+  )
+    ? "lecture"
+    : "other";
+}
+
+function regionText(schedule: Schedule) {
+  if (schedule.kind === "office" || schedule.kind === "off") return "";
+  return schedule.region || "지역 미정";
+}
+
+function parseExcelDate(value: unknown, baseYear: number) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return isoFromLocalDate(value);
+  }
+  if (typeof value === "number") {
+    const epoch = Date.UTC(1899, 11, 30);
+    const date = new Date(epoch + value * 86_400_000);
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(
+      2,
+      "0",
+    )}-${String(date.getUTCDate()).padStart(2, "0")}`;
+  }
+  const text = readCellText(value);
+  const koreanDate = text.match(/(?:(\d{4})\s*[년./-]\s*)?(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if (koreanDate) {
+    const year = Number(koreanDate[1] || baseYear);
+    return `${year}-${String(Number(koreanDate[2])).padStart(2, "0")}-${String(
+      Number(koreanDate[3]),
+    ).padStart(2, "0")}`;
+  }
+  const plainDate = text.match(/(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+  if (plainDate) {
+    return `${plainDate[1]}-${String(Number(plainDate[2])).padStart(
+      2,
+      "0",
+    )}-${String(Number(plainDate[3])).padStart(2, "0")}`;
+  }
+  return null;
+}
+
+function parseTimeRange(value: unknown) {
+  const text = readCellText(value).replace(/\s/g, "");
+  const match = text.match(
+    /(\d{1,2}):(\d{2})[~\-–—〜](\d{1,2}):(\d{2})/,
+  );
+  if (!match) return null;
+  return {
+    startTime: `${String(Number(match[1])).padStart(2, "0")}:${match[2]}`,
+    endTime: `${String(Number(match[3])).padStart(2, "0")}:${match[4]}`,
+  };
+}
+
+function emptySchedule(date = TODAY, instructor = "문건우"): Schedule {
+  return {
+    id: "",
+    date,
+    startTime: "11:30",
+    endTime: "13:00",
+    instructor,
+    session: "오전",
+    kind: "lecture",
+    status: "confirmed",
+    arrivalMinutes: 30,
+    source: "manual",
+    modifiedAt: new Date().toISOString(),
+  };
+}
+
+export default function Home() {
+  const calendarRef = useRef<FullCalendar | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [instructorColors, setInstructorColors] = useState<Record<string, string>>(
+    INSTRUCTOR_COLOR_OVERRIDES,
+  );
+  const [kindColors, setKindColors] = useState<Record<ScheduleKind, string>>(
+    DEFAULT_KIND_COLORS,
+  );
+  const [instructorOrder, setInstructorOrder] = useState<string[]>([
+    ...CORE_INSTRUCTORS,
+  ]);
+  const [hydrated, setHydrated] = useState(false);
+  const [roleKey, setRoleKey] = useState<RoleKey>("admin");
+  const [calendarView, setCalendarView] =
+    useState<CalendarView>("dayGridMonth");
+  const [calendarTitle, setCalendarTitle] = useState("2026년 7월");
+  const [instructorFilter, setInstructorFilter] = useState("all");
+  const [kindFilters, setKindFilters] = useState<ScheduleKind[]>([
+    "lecture",
+    "assistant",
+    "office",
+    "off",
+    "other",
+  ]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilters, setStatusFilters] = useState<ScheduleStatus[]>([
+    "confirmed",
+    "pending",
+    "cancelled",
+  ]);
+  const [editorSchedule, setEditorSchedule] = useState<Schedule | null>(null);
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [isBulkSelectionMode, setIsBulkSelectionMode] = useState(false);
+  const [bulkSelectedDates, setBulkSelectedDates] = useState<string[]>([]);
+  const [bulkEditorDates, setBulkEditorDates] = useState<string[] | null>(null);
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importYear, setImportYear] = useState(new Date().getFullYear());
+  const [lectureKeywords, setLectureKeywords] = useState<string[]>(
+    DEFAULT_LECTURE_KEYWORDS,
+  );
+  const [lectureKeywordInput, setLectureKeywordInput] = useState("");
+  const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
+  const [importFileName, setImportFileName] = useState("");
+  const [importMessage, setImportMessage] = useState(
+    "표준 일정표를 선택하면 반영 전에 결과를 확인할 수 있습니다.",
+  );
+  const [isParsing, setIsParsing] = useState(false);
+  const dragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        try {
+          const savedSchedules = JSON.parse(saved) as Schedule[];
+          setSchedules(
+            (Array.isArray(savedSchedules) ? savedSchedules : [])
+              .filter((schedule) => schedule.source !== "sample")
+          );
+        } catch {
+          setSchedules([]);
+        }
+      }
+      const savedColors = window.localStorage.getItem(COLOR_STORAGE_KEY);
+      if (savedColors) {
+        try {
+          setInstructorColors({
+            ...INSTRUCTOR_COLOR_OVERRIDES,
+            ...(JSON.parse(savedColors) as Record<string, string>),
+          });
+        } catch {
+          setInstructorColors(INSTRUCTOR_COLOR_OVERRIDES);
+        }
+      }
+      const savedKindColors = window.localStorage.getItem(KIND_COLOR_STORAGE_KEY);
+      if (savedKindColors) {
+        try {
+          setKindColors({
+            ...DEFAULT_KIND_COLORS,
+            ...(JSON.parse(savedKindColors) as Partial<
+              Record<ScheduleKind, string>
+            >),
+          });
+        } catch {
+          setKindColors(DEFAULT_KIND_COLORS);
+        }
+      }
+      const savedInstructorOrder = window.localStorage.getItem(
+        INSTRUCTOR_ORDER_STORAGE_KEY,
+      );
+      if (savedInstructorOrder) {
+        try {
+          setInstructorOrder(JSON.parse(savedInstructorOrder) as string[]);
+        } catch {
+          setInstructorOrder([...CORE_INSTRUCTORS]);
+        }
+      }
+      const savedLectureKeywords = window.localStorage.getItem(
+        LECTURE_KEYWORDS_STORAGE_KEY,
+      );
+      if (savedLectureKeywords) {
+        try {
+          setLectureKeywords(
+            normalizeLectureKeywords(JSON.parse(savedLectureKeywords)),
+          );
+        } catch {
+          setLectureKeywords([...DEFAULT_LECTURE_KEYWORDS]);
+        }
+      }
+      setHydrated(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (hydrated) {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(schedules));
+    }
+  }, [hydrated, schedules]);
+
+  useEffect(() => {
+    if (hydrated) {
+      window.localStorage.setItem(
+        COLOR_STORAGE_KEY,
+        JSON.stringify(instructorColors),
+      );
+    }
+  }, [hydrated, instructorColors]);
+
+  useEffect(() => {
+    if (hydrated) {
+      window.localStorage.setItem(
+        KIND_COLOR_STORAGE_KEY,
+        JSON.stringify(kindColors),
+      );
+    }
+  }, [hydrated, kindColors]);
+
+  useEffect(() => {
+    if (hydrated) {
+      window.localStorage.setItem(
+        INSTRUCTOR_ORDER_STORAGE_KEY,
+        JSON.stringify(instructorOrder),
+      );
+    }
+  }, [hydrated, instructorOrder]);
+
+  useEffect(() => {
+    if (hydrated) {
+      window.localStorage.setItem(
+        LECTURE_KEYWORDS_STORAGE_KEY,
+        JSON.stringify(lectureKeywords),
+      );
+    }
+  }, [hydrated, lectureKeywords]);
+
+  const availableInstructors = useMemo(
+    () =>
+      Array.from(
+        new Set([...CORE_INSTRUCTORS, ...schedules.map((item) => item.instructor)]),
+      ).sort((a, b) => a.localeCompare(b, "ko-KR")),
+    [schedules],
+  );
+
+  const instructors = useMemo(
+    () => [
+      ...instructorOrder.filter((name) => availableInstructors.includes(name)),
+      ...availableInstructors.filter((name) => !instructorOrder.includes(name)),
+    ],
+    [availableInstructors, instructorOrder],
+  );
+  const colorSettingInstructors =
+    instructorFilter === "all"
+      ? instructors
+      : instructors.filter((instructor) => instructor === instructorFilter);
+
+  const mainLectures = useMemo(
+    () =>
+      schedules
+        .filter((schedule) => schedule.kind === "lecture")
+        .sort((a, b) =>
+          `${a.date}|${a.startTime || "99:99"}|${a.instructor}`.localeCompare(
+            `${b.date}|${b.startTime || "99:99"}|${b.instructor}`,
+            "ko-KR",
+          ),
+        ),
+    [schedules],
+  );
+
+  const activeInstructor = roleInstructor(roleKey);
+  const isAdmin = roleKey === "admin";
+
+  const canEdit = (schedule: Schedule) =>
+    isAdmin || schedule.instructor === activeInstructor;
+
+  const { filteredSchedules, kindCounts, statusCounts } = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase("ko-KR");
+    const instructorAndSearchSchedules = schedules.filter((schedule) => {
+      if (instructorFilter !== "all" && schedule.instructor !== instructorFilter) {
+        return false;
+      }
+      if (!query) return true;
+      return [
+        schedule.instructor,
+        schedule.region,
+        schedule.venue,
+        schedule.topic,
+        schedule.note,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase("ko-KR")
+        .includes(query);
+    });
+    const kindCountSource = instructorAndSearchSchedules.filter((schedule) =>
+      statusFilters.includes(schedule.status),
+    );
+    const statusCountSource = instructorAndSearchSchedules.filter((schedule) =>
+      kindFilters.includes(schedule.kind),
+    );
+    return {
+      filteredSchedules: instructorAndSearchSchedules.filter(
+        (schedule) =>
+          kindFilters.includes(schedule.kind) &&
+          statusFilters.includes(schedule.status),
+      ),
+      kindCounts: Object.fromEntries(
+        (Object.keys(KIND_META) as ScheduleKind[]).map((kind) => [
+          kind,
+          kindCountSource.filter((schedule) => schedule.kind === kind).length,
+        ]),
+      ) as Record<ScheduleKind, number>,
+      statusCounts: Object.fromEntries(
+        (Object.keys(STATUS_META) as ScheduleStatus[]).map((status) => [
+          status,
+          statusCountSource.filter((schedule) => schedule.status === status)
+            .length,
+        ]),
+      ) as Record<ScheduleStatus, number>,
+    };
+  }, [instructorFilter, kindFilters, schedules, searchQuery, statusFilters]);
+
+  const calendarEvents = useMemo<EventInput[]>(
+    () =>
+      filteredSchedules.map((schedule) => {
+        const meta = KIND_META[schedule.kind];
+        const isAllDay = !schedule.startTime || !schedule.endTime;
+        return {
+          id: schedule.id,
+          title: [
+            schedule.instructor,
+            schedule.topic || meta.label,
+            regionText(schedule),
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          start: isAllDay
+            ? schedule.date
+            : `${schedule.date}T${schedule.startTime}:00`,
+          end: isAllDay
+            ? undefined
+            : `${schedule.date}T${schedule.endTime}:00`,
+          allDay: isAllDay,
+          backgroundColor: instructorColor(schedule.instructor, instructorColors),
+          borderColor: "transparent",
+          textColor: "#ffffff",
+          instructorRank: instructors.indexOf(schedule.instructor),
+          editable: isAdmin || schedule.instructor === activeInstructor,
+          classNames: [
+            `schedule-${schedule.kind}`,
+            `schedule-${schedule.status}`,
+          ],
+          extendedProps: {
+            schedule,
+            kindColor: kindColors[schedule.kind],
+          },
+        };
+      }),
+    [
+      activeInstructor,
+      filteredSchedules,
+      instructorColors,
+      instructors,
+      isAdmin,
+      kindColors,
+    ],
+  );
+
+  const todaySchedules = filteredSchedules
+    .filter(
+      (item) =>
+        item.date === TODAY &&
+        item.kind !== "off" &&
+        item.status !== "cancelled",
+    )
+    .sort((a, b) =>
+      `${a.date}|${a.startTime || ""}`.localeCompare(
+        `${b.date}|${b.startTime || ""}`,
+      ),
+    );
+  const weekRange = currentWeekRange(TODAY);
+  const weekCount = filteredSchedules.filter(
+    (item) =>
+      item.kind !== "off" &&
+      item.status !== "cancelled" &&
+      item.date >= weekRange.start &&
+      item.date <= weekRange.end,
+  ).length;
+
+  function changeView(view: CalendarView) {
+    setCalendarView(view);
+    calendarRef.current?.getApi().changeView(view);
+  }
+
+  function showCurrentWeek() {
+    calendarRef.current?.getApi().gotoDate(TODAY);
+    changeView("timeGridWeek");
+  }
+
+  function handleInstructorDragEnd(event: DragEndEvent) {
+    if (!isAdmin || !event.over || event.active.id === event.over.id) return;
+    const oldIndex = instructors.indexOf(String(event.active.id));
+    const newIndex = instructors.indexOf(String(event.over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    setInstructorOrder(arrayMove(instructors, oldIndex, newIndex));
+  }
+
+  function openNewSchedule(date = TODAY, startTime?: string) {
+    const preferredInstructor =
+      activeInstructor || (instructorFilter !== "all" ? instructorFilter : "문건우");
+    const schedule = emptySchedule(date, preferredInstructor);
+    setEditorSchedule(
+      startTime
+        ? {
+            ...schedule,
+            startTime,
+            endTime: addMinutesToTime(startTime, 60),
+            session: deriveSession(startTime),
+          }
+        : schedule,
+    );
+    setIsBulkSelectionMode(false);
+    setBulkSelectedDates([]);
+    setBulkEditorDates(null);
+    setIsEditorOpen(true);
+  }
+
+  function toggleBulkDate(date: string) {
+    setBulkSelectedDates((current) =>
+      current.includes(date)
+        ? current.filter((item) => item !== date)
+        : [...current, date].sort(),
+    );
+  }
+
+  function toggleBulkSelectionMode() {
+    if (isBulkSelectionMode) {
+      setBulkSelectedDates([]);
+      setIsBulkSelectionMode(false);
+      return;
+    }
+    setIsBulkSelectionMode(true);
+  }
+
+  function openBulkScheduleEditor() {
+    if (bulkSelectedDates.length === 0) return;
+    const preferredInstructor =
+      activeInstructor || (instructorFilter !== "all" ? instructorFilter : "문건우");
+    setEditorSchedule(emptySchedule(bulkSelectedDates[0], preferredInstructor));
+    setBulkEditorDates([...bulkSelectedDates]);
+    setIsEditorOpen(true);
+  }
+
+  function handleEventClick(info: EventClickArg) {
+    const schedule = schedules.find((item) => item.id === info.event.id);
+    if (!schedule) return;
+    if (isBulkSelectionMode) {
+      toggleBulkDate(schedule.date);
+      return;
+    }
+    setEditorSchedule(schedule);
+    setBulkEditorDates(null);
+    setIsEditorOpen(true);
+  }
+
+  function handleDateClick(info: DateClickArg) {
+    if (isBulkSelectionMode) {
+      toggleBulkDate(info.dateStr.slice(0, 10));
+      return;
+    }
+    openNewSchedule(
+      info.dateStr.slice(0, 10),
+      info.allDay ? undefined : timeFromLocalDate(info.date),
+    );
+  }
+
+  function handleDatesSet(info: DatesSetArg) {
+    setCalendarTitle(info.view.title);
+    if (
+      info.view.type === "dayGridMonth" ||
+      info.view.type === "timeGridWeek" ||
+      info.view.type === "timeGridDay"
+    ) {
+      setCalendarView(info.view.type);
+    }
+  }
+
+  function saveSchedule(schedule: Schedule) {
+    const nextSchedule = {
+      ...schedule,
+      session: schedule.session || deriveSession(schedule.startTime),
+      modifiedAt: new Date().toISOString(),
+    };
+    if (schedule.id) {
+      setSchedules((items) =>
+        items.map((item) => (item.id === schedule.id ? nextSchedule : item)),
+      );
+    } else {
+      setSchedules((items) => [
+        ...items,
+        { ...nextSchedule, id: crypto.randomUUID() },
+      ]);
+    }
+    setIsEditorOpen(false);
+    setBulkEditorDates(null);
+  }
+
+  function saveBulkSchedules(
+    template: Schedule,
+    dates: string[],
+    parentScheduleIds: Record<string, string>,
+  ) {
+    setSchedules((items) => {
+      const created = dates.flatMap((date) => {
+        const parentScheduleId = parentScheduleIds[date];
+        const parentLecture = items.find(
+          (item) => item.id === parentScheduleId && item.kind === "lecture",
+        );
+        if (template.kind === "assistant" && !parentLecture) return [];
+
+        const nextSchedule: Schedule = parentLecture
+          ? {
+              ...template,
+              id: crypto.randomUUID(),
+              date,
+              startTime: parentLecture.startTime,
+              endTime: parentLecture.endTime,
+              region: parentLecture.region,
+              venue: parentLecture.venue,
+              session:
+                parentLecture.session || deriveSession(parentLecture.startTime),
+              topic: parentLecture.topic,
+              status: parentLecture.status,
+              parentScheduleId: parentLecture.id,
+              modifiedAt: new Date().toISOString(),
+            }
+          : {
+              ...template,
+              id: crypto.randomUUID(),
+              date,
+              parentScheduleId: undefined,
+              session: template.session || deriveSession(template.startTime),
+              modifiedAt: new Date().toISOString(),
+            };
+        return [nextSchedule];
+      });
+      return [...items, ...created];
+    });
+    setIsEditorOpen(false);
+    setBulkEditorDates(null);
+    setBulkSelectedDates([]);
+    setIsBulkSelectionMode(false);
+  }
+
+  function deleteSchedule(schedule: Schedule) {
+    if (isAdmin) {
+      setSchedules((items) => items.filter((item) => item.id !== schedule.id));
+    } else if (schedule.instructor === activeInstructor) {
+      setSchedules((items) =>
+        items.map((item) =>
+          item.id === schedule.id
+            ? { ...item, status: "cancelled", modifiedAt: new Date().toISOString() }
+            : item,
+        ),
+      );
+    }
+    setIsEditorOpen(false);
+  }
+
+  async function parseWorkbook(file: File) {
+    setIsParsing(true);
+    setImportCandidates([]);
+    setImportFileName(file.name);
+    setImportMessage("일정표 구조와 날짜 형식을 확인하고 있습니다.");
+
+    try {
+      const ExcelJS = await import("exceljs");
+      const workbook = new ExcelJS.Workbook();
+      const buffer = await file.arrayBuffer();
+      await workbook.xlsx.load(buffer);
+      const parsed: ImportCandidate[] = [];
+
+      workbook.eachSheet((worksheet) => {
+        let headerRowNumber = 0;
+        const headers = new Map<string, number>();
+
+        for (let rowNumber = 1; rowNumber <= Math.min(10, worksheet.rowCount); rowNumber += 1) {
+          const row = worksheet.getRow(rowNumber);
+          const rowValues: string[] = [];
+          row.eachCell({ includeEmpty: true }, (cell) => {
+            rowValues.push(readCellText(cell.value));
+          });
+          if (rowValues.includes("날짜") && rowValues.includes("강사")) {
+            headerRowNumber = rowNumber;
+            row.eachCell({ includeEmpty: true }, (cell, columnNumber) => {
+              headers.set(readCellText(cell.value).replace(/\s/g, ""), columnNumber);
+            });
+            break;
+          }
+        }
+
+        if (!headerRowNumber) {
+          parsed.push({
+            key: `${worksheet.name}-header`,
+            rowNumber: 0,
+            sheetName: worksheet.name,
+            action: "error",
+            message: "날짜와 강사 열을 찾지 못했습니다.",
+          });
+          return;
+        }
+
+        const column = (label: string) => {
+          const normalized = label.replace(/\s/g, "");
+          const direct = headers.get(normalized);
+          if (direct) return direct;
+          for (const [header, index] of headers) {
+            if (header.includes(normalized)) return index;
+          }
+          return 0;
+        };
+
+        const dateColumn = column("날짜");
+        const instructorColumn = column("강사");
+        const regionColumn = column("지역");
+        const venueColumn = column("장소");
+        const sessionColumn = column("전/후");
+        const timeColumn = column("강연시간");
+        const noteColumn = column("비고");
+
+        for (
+          let rowNumber = headerRowNumber + 1;
+          rowNumber <= worksheet.rowCount;
+          rowNumber += 1
+        ) {
+          const row = worksheet.getRow(rowNumber);
+          const rawDate = row.getCell(dateColumn).value;
+          const instructor = readCellText(row.getCell(instructorColumn).value);
+          const date = parseExcelDate(rawDate, importYear);
+          const rawTime = readCellText(row.getCell(timeColumn).value);
+          const timeRange = parseTimeRange(rawTime);
+
+          if (!date && !instructor && !rawTime) continue;
+          if (!date || !instructor) {
+            parsed.push({
+              key: `${worksheet.name}-${rowNumber}`,
+              rowNumber,
+              sheetName: worksheet.name,
+              action: "error",
+              message: !date ? "날짜를 읽을 수 없습니다." : "강사명이 비어 있습니다.",
+            });
+            continue;
+          }
+
+          const region = readCellText(row.getCell(regionColumn).value);
+          const rawVenue = readCellText(row.getCell(venueColumn).value);
+          const rawSession = readCellText(row.getCell(sessionColumn).value);
+          const rawNote = readCellText(row.getCell(noteColumn).value);
+          const cancelled = /연기|취소/.test(rawNote);
+          const pending = /미정|연기/.test(rawVenue);
+          const importedKind = classifyExcelKind(rawNote, lectureKeywords);
+          const sourceNote = [
+            pending && rawVenue ? `원본 장소 표기: ${rawVenue}` : "",
+            cancelled && rawVenue ? rawVenue : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
+
+          const schedule: Schedule = {
+            id: "",
+            date,
+            startTime: timeRange?.startTime,
+            endTime: timeRange?.endTime,
+            instructor,
+            region: region || undefined,
+            venue: pending && rawVenue.includes("연기") ? undefined : rawVenue || undefined,
+            session: rawSession || deriveSession(timeRange?.startTime),
+            topic: rawNote || undefined,
+            kind: importedKind,
+            status: cancelled ? "cancelled" : pending ? "pending" : "confirmed",
+            note: sourceNote || undefined,
+            arrivalMinutes: timeRange ? 30 : 0,
+            source: "excel",
+            modifiedAt: new Date().toISOString(),
+          };
+
+          parsed.push(
+            classifyImportCandidate(schedule, schedules, {
+              key: `${worksheet.name}-${rowNumber}`,
+              rowNumber,
+              sheetName: worksheet.name,
+            }),
+          );
+        }
+      });
+
+      setImportCandidates(parsed);
+      const validCount = parsed.filter((item) => item.action !== "error").length;
+      setImportMessage(
+        `${workbook.worksheets.length}개 시트에서 ${validCount}개 일정을 확인했습니다.`,
+      );
+    } catch (error) {
+      setImportCandidates([]);
+      setImportMessage(
+        error instanceof Error
+          ? `파일을 읽지 못했습니다: ${error.message}`
+          : "파일을 읽지 못했습니다.",
+      );
+    } finally {
+      setIsParsing(false);
+    }
+  }
+
+  function applyLectureKeywords(nextKeywords: string[]) {
+    const normalizedKeywords = normalizeLectureKeywords(nextKeywords);
+    setLectureKeywords(normalizedKeywords);
+    setImportCandidates((current) =>
+      current.map((candidate) => {
+        if (!candidate.schedule) return candidate;
+        const schedule = {
+          ...candidate.schedule,
+          kind: classifyExcelKind(
+            candidate.schedule.topic || "",
+            normalizedKeywords,
+          ),
+        };
+        return classifyImportCandidate(
+          schedule,
+          schedules,
+          {
+            key: candidate.key,
+            rowNumber: candidate.rowNumber,
+            sheetName: candidate.sheetName,
+          },
+        );
+      }),
+    );
+    if (importCandidates.length > 0) {
+      setImportMessage(
+        "본강의 판별 항목을 변경하고 가져오기 결과를 다시 계산했습니다.",
+      );
+    }
+  }
+
+  function addLectureKeyword() {
+    const keyword = lectureKeywordInput.trim();
+    if (!keyword) return;
+    const normalizedKeyword = keyword.toLocaleLowerCase("ko-KR");
+    if (
+      lectureKeywords.some(
+        (item) => item.toLocaleLowerCase("ko-KR") === normalizedKeyword,
+      )
+    ) {
+      setLectureKeywordInput("");
+      return;
+    }
+    applyLectureKeywords([...lectureKeywords, keyword]);
+    setLectureKeywordInput("");
+  }
+
+  function removeLectureKeyword(keyword: string) {
+    applyLectureKeywords(
+      lectureKeywords.filter((item) => item !== keyword),
+    );
+  }
+
+  function applyImport() {
+    const importedInstructors = Array.from(
+      new Set(
+        importCandidates.flatMap((candidate) =>
+          candidate.schedule ? [candidate.schedule.instructor] : [],
+        ),
+      ),
+    );
+    setInstructorOrder((current) => [
+      ...current,
+      ...importedInstructors.filter((name) => !current.includes(name)),
+    ]);
+    setSchedules((items) => {
+      let next = [...items];
+      importCandidates.forEach((candidate) => {
+        if (!candidate.schedule) return;
+        if (candidate.action === "new") {
+          next.push({ ...candidate.schedule, id: crypto.randomUUID() });
+        }
+        if (candidate.action === "update" && candidate.matchId) {
+          next = next.map((item) =>
+            item.id === candidate.matchId
+              ? { ...candidate.schedule!, id: candidate.matchId }
+              : item,
+          );
+        }
+      });
+      return next;
+    });
+    const applied = importCandidates.filter(
+      (item) => item.action === "new" || item.action === "update",
+    ).length;
+    setImportMessage(
+      applied > 0
+        ? `${applied}개 일정이 달력에 반영되었습니다.`
+        : "변경된 내용이 없어 기존 일정을 그대로 유지했습니다.",
+    );
+    setImportCandidates([]);
+    setImportFileName("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setIsImportOpen(false);
+  }
+
+  function toggleKind(kind: ScheduleKind) {
+    setKindFilters((current) =>
+      current.includes(kind)
+        ? current.filter((item) => item !== kind)
+        : [...current, kind],
+    );
+  }
+
+  function toggleStatus(status: ScheduleStatus) {
+    setStatusFilters((current) =>
+      current.includes(status)
+        ? current.filter((item) => item !== status)
+        : [...current, status],
+    );
+  }
+
+  return (
+    <main className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-row">
+          <div className="brand-mark">
+            <CalendarDays size={20} />
+          </div>
+          <div>
+            <strong>강사 일정 보드</strong>
+            <span>사내 통합 스케줄</span>
+          </div>
+        </div>
+
+        <button className="primary-action" onClick={() => openNewSchedule()}>
+          <Plus size={18} />
+          일정 등록
+        </button>
+
+        <section className="filter-section">
+          <div className="section-label">
+            <UsersRound size={15} />
+            강사
+          </div>
+          <label className="select-wrap">
+            <select
+              value={instructorFilter}
+              onChange={(event) => setInstructorFilter(event.target.value)}
+            >
+              <option value="all">전체 강사</option>
+              {instructors.map((instructor) => (
+                <option value={instructor} key={instructor}>
+                  {instructor}
+                </option>
+              ))}
+            </select>
+          </label>
+        </section>
+
+        <section className="filter-section instructor-color-section">
+          <div className="section-label">
+            <Palette size={15} />
+            강사별 색상
+          </div>
+          {hydrated ? (
+            <DndContext
+              sensors={dragSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleInstructorDragEnd}
+            >
+              <SortableContext
+                items={colorSettingInstructors}
+                strategy={verticalListSortingStrategy}
+              >
+                <div className="instructor-color-list">
+                  {colorSettingInstructors.map((instructor) => (
+                    <SortableInstructorColorRow
+                      key={instructor}
+                      instructor={instructor}
+                      color={instructorColor(instructor, instructorColors)}
+                      canChangeColor={
+                        isAdmin || instructor === activeInstructor
+                      }
+                      canReorder={isAdmin && instructorFilter === "all"}
+                      onColorChange={(color) =>
+                        setInstructorColors((current) => ({
+                          ...current,
+                          [instructor]: color,
+                        }))
+                      }
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+          ) : (
+            <div className="instructor-color-list" aria-hidden="true">
+              {colorSettingInstructors.map((instructor) => (
+                <div className="instructor-color-row" key={instructor}>
+                  <button className="drag-handle" type="button" disabled>
+                    <GripVertical size={18} />
+                  </button>
+                  <span
+                    className="instructor-color-preview"
+                    style={{
+                      background: instructorColor(instructor, instructorColors),
+                    }}
+                  />
+                  <span className="instructor-name">{instructor}</span>
+                  <input
+                    type="color"
+                    value={instructorColor(instructor, instructorColors)}
+                    disabled
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+          <small className="color-setting-help">
+            {instructorFilter !== "all"
+              ? "선택한 강사의 달력 색상을 지정하세요."
+              : isAdmin
+              ? "손잡이로 순서를 바꾸고, 색상 칸에서 달력 색상을 지정하세요."
+              : "내 강사 색상만 변경할 수 있습니다."}
+          </small>
+        </section>
+
+        <section className="filter-section">
+          <div className="section-label with-actions">
+            <span className="section-label-title">
+              <Filter size={15} />
+              일정 종류
+            </span>
+            <span className="filter-bulk-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  setKindFilters(
+                    kindFilters.length === Object.keys(KIND_META).length
+                      ? []
+                      : (Object.keys(KIND_META) as ScheduleKind[]),
+                  )
+                }
+              >
+                {kindFilters.length === Object.keys(KIND_META).length
+                  ? "전체 해제"
+                  : "전체 선택"}
+              </button>
+            </span>
+          </div>
+          <div className="kind-filter-list">
+            {(Object.keys(KIND_META) as ScheduleKind[]).map((kind) => {
+              const meta = KIND_META[kind];
+              const color = kindColors[kind];
+              const checked = kindFilters.includes(kind);
+              return (
+                <div className="kind-filter-row" key={kind}>
+                  <label className="filter-check">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleKind(kind)}
+                    />
+                    <span
+                      className="check-box"
+                      style={{
+                        background: checked ? color : "transparent",
+                        borderColor: checked ? color : "#cbd5e1",
+                      }}
+                    >
+                      {checked && <Check size={12} />}
+                    </span>
+                    <span className="kind-dot" style={{ background: color }} />
+                    {meta.label}
+                    <span className="filter-count">
+                      {kindCounts[kind]}
+                    </span>
+                  </label>
+                  <input
+                    className="kind-color-input"
+                    type="color"
+                    value={color}
+                    disabled={!isAdmin}
+                    aria-label={`${meta.label} 색상 선택`}
+                    title={
+                      isAdmin
+                        ? `${meta.label} 색상 선택`
+                        : "전체 관리자만 변경할 수 있습니다"
+                    }
+                    onChange={(event) =>
+                      setKindColors((current) => ({
+                        ...current,
+                        [kind]: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="filter-section">
+          <div className="section-label with-actions">
+            <span className="section-label-title">
+              <CircleAlert size={15} />
+              일정 상태
+            </span>
+            <span className="filter-bulk-actions">
+              <button
+                type="button"
+                onClick={() =>
+                  setStatusFilters(
+                    statusFilters.length === Object.keys(STATUS_META).length
+                      ? []
+                      : (Object.keys(STATUS_META) as ScheduleStatus[]),
+                  )
+                }
+              >
+                {statusFilters.length === Object.keys(STATUS_META).length
+                  ? "전체 해제"
+                  : "전체 선택"}
+              </button>
+            </span>
+          </div>
+          <div className="status-filter-list">
+            {(Object.keys(STATUS_META) as ScheduleStatus[]).map((status) => {
+              const meta = STATUS_META[status];
+              const checked = statusFilters.includes(status);
+              return (
+                <label className="filter-check" key={status}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleStatus(status)}
+                  />
+                  <span
+                    className="check-box"
+                    style={{
+                      background: checked ? meta.color : "transparent",
+                      borderColor: checked ? meta.color : "#cbd5e1",
+                    }}
+                  >
+                    {checked && <Check size={12} />}
+                  </span>
+                  <span className="kind-dot" style={{ background: meta.color }} />
+                  {meta.label}
+                  <span className="filter-count">
+                    {statusCounts[status]}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <small className="status-filter-help">
+            장소가 미정·연기이거나 직접 상태를 지정한 일정은 확인 필요로
+            표시됩니다.
+          </small>
+        </section>
+
+        <section className="today-card">
+          <span className="eyebrow">오늘의 일정</span>
+          <strong>{todaySchedules.length}건</strong>
+          <div className="today-stack">
+            {todaySchedules.length ? (
+              todaySchedules.slice(0, 3).map((schedule) => (
+                <button
+                  key={schedule.id}
+                  onClick={() => {
+                    setEditorSchedule(schedule);
+                    setBulkEditorDates(null);
+                    setIsEditorOpen(true);
+                  }}
+                >
+                  <span
+                    style={{
+                      background: instructorColor(
+                        schedule.instructor,
+                        instructorColors,
+                      ),
+                    }}
+                  />
+                  <div>
+                    <b>{schedule.instructor}</b>
+                    <small>
+                      {[
+                        schedule.startTime || "종일",
+                        schedule.topic || KIND_META[schedule.kind].label,
+                        regionText(schedule),
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </small>
+                  </div>
+                </button>
+              ))
+            ) : (
+              <p>조건에 맞는 오늘 일정이 없습니다.</p>
+            )}
+          </div>
+        </section>
+
+      </aside>
+
+      <section className="workspace">
+        <header className="topbar">
+          <div className="search-box">
+            <Search size={17} />
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="강사, 지역, 장소 검색"
+              aria-label="일정 검색"
+            />
+            {searchQuery && (
+              <button aria-label="검색 지우기" onClick={() => setSearchQuery("")}>
+                <X size={15} />
+              </button>
+            )}
+          </div>
+          <div className="topbar-spacer" />
+          <span className="prototype-badge">로컬 프로토타입</span>
+          <label className="role-switcher">
+            <ShieldCheck size={17} />
+            <select
+              value={roleKey}
+              onChange={(event) => setRoleKey(event.target.value as RoleKey)}
+              aria-label="권한 미리보기"
+            >
+              <option value="admin">전체 관리자</option>
+              {instructors.map((instructor) => (
+                <option key={instructor} value={`instructor:${instructor}`}>
+                  {instructor} 강사
+                </option>
+              ))}
+            </select>
+          </label>
+        </header>
+
+        <div className="dashboard-strip">
+          <div className="strip-heading">
+            <p>통합 일정</p>
+            <h1>{calendarTitle}</h1>
+          </div>
+          <button
+            type="button"
+            className="mini-stat"
+            onClick={showCurrentWeek}
+            title="현재 필터가 적용된 일요일~토요일 일정을 봅니다"
+          >
+            <span>이번 주</span>
+            <b>{weekCount}</b>
+            <small>개 일정</small>
+          </button>
+        </div>
+
+        <div className="calendar-card">
+          <div className="calendar-toolbar">
+            <div className="calendar-nav">
+              <button
+                className="icon-button"
+                aria-label="이전 기간"
+                onClick={() => calendarRef.current?.getApi().prev()}
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                className="today-button"
+                onClick={() => calendarRef.current?.getApi().today()}
+              >
+                오늘
+              </button>
+              <button
+                className="icon-button"
+                aria-label="다음 기간"
+                onClick={() => calendarRef.current?.getApi().next()}
+              >
+                <ChevronRight size={18} />
+              </button>
+            </div>
+
+            <div className="view-switch" aria-label="달력 보기 선택">
+              {(
+                [
+                  ["dayGridMonth", "월"],
+                  ["timeGridWeek", "주"],
+                  ["timeGridDay", "일"],
+                ] as [CalendarView, string][]
+              ).map(([view, label]) => (
+                <button
+                  key={view}
+                  className={calendarView === view ? "active" : ""}
+                  onClick={() => changeView(view)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="toolbar-actions">
+              <button
+                className={`bulk-select-button ${
+                  isBulkSelectionMode ? "active" : ""
+                }`}
+                aria-pressed={isBulkSelectionMode}
+                onClick={toggleBulkSelectionMode}
+              >
+                <ListPlus size={17} />
+                {isBulkSelectionMode ? "선택 모드 종료" : "여러 날짜 선택"}
+              </button>
+              <button
+                className="excel-button"
+                onClick={() => setIsImportOpen(true)}
+                disabled={!isAdmin}
+                title={isAdmin ? "엑셀 일정 가져오기" : "전체 관리자만 사용할 수 있습니다"}
+              >
+                <FileSpreadsheet size={17} />
+                엑셀 가져오기
+              </button>
+            </div>
+          </div>
+
+          {isBulkSelectionMode && (
+            <div className="bulk-selection-bar">
+              <div>
+                <ListPlus size={19} />
+                <p>
+                  <strong>{bulkSelectedDates.length}개 날짜 선택됨</strong>
+                  <span>달력의 날짜를 눌러 선택하거나 다시 눌러 해제하세요.</span>
+                </p>
+              </div>
+              <div className="bulk-selection-actions">
+                <button
+                  className="secondary-button"
+                  disabled={bulkSelectedDates.length === 0}
+                  onClick={() => setBulkSelectedDates([])}
+                >
+                  선택 해제
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={bulkSelectedDates.length === 0}
+                  onClick={openBulkScheduleEditor}
+                >
+                  {bulkSelectedDates.length > 0
+                    ? `${bulkSelectedDates.length}개 날짜 일괄 등록`
+                    : "날짜를 선택하세요"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="calendar-stage">
+            <FullCalendar
+              ref={calendarRef}
+              plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
+              initialView="dayGridMonth"
+              initialDate={TODAY}
+              headerToolbar={false}
+              locale="ko"
+              firstDay={0}
+              height="100%"
+              expandRows
+              nowIndicator
+              navLinks={false}
+              selectable
+              dayMaxEvents={3}
+              moreLinkText={(count) => `+${count}개`}
+              allDayText="시간 미정·종일"
+              slotMinTime="08:00:00"
+              slotMaxTime="23:30:00"
+              slotDuration="00:30:00"
+              slotLabelFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+              eventTimeFormat={{ hour: "2-digit", minute: "2-digit", hour12: false }}
+              events={calendarEvents}
+              eventOrder="start,instructorRank"
+              eventOrderStrict
+              dayCellClassNames={(info) =>
+                bulkSelectedDates.includes(isoFromLocalDate(info.date))
+                  ? ["bulk-selected-day"]
+                  : []
+              }
+              dateClick={handleDateClick}
+              eventClick={handleEventClick}
+              datesSet={handleDatesSet}
+              eventDrop={(info) => {
+                const schedule = schedules.find((item) => item.id === info.event.id);
+                if (!schedule || !canEdit(schedule) || !info.event.start) {
+                  info.revert();
+                  return;
+                }
+                const nextDate = isoFromLocalDate(info.event.start);
+                setSchedules((items) =>
+                  items.map((item) =>
+                    item.id === schedule.id
+                      ? {
+                          ...item,
+                          date: nextDate,
+                          startTime: info.event.allDay
+                            ? undefined
+                            : timeFromLocalDate(info.event.start!),
+                          endTime:
+                            info.event.allDay || !info.event.end
+                              ? item.endTime
+                              : timeFromLocalDate(info.event.end),
+                          modifiedAt: new Date().toISOString(),
+                        }
+                      : item,
+                  ),
+                );
+              }}
+              eventContent={(content: EventContentArg) => {
+                const schedule = content.event.extendedProps.schedule as Schedule;
+                const kindColor = content.event.extendedProps.kindColor as string;
+                const meta = KIND_META[schedule.kind];
+                const eventColor = instructorColor(
+                  schedule.instructor,
+                  instructorColors,
+                );
+                return (
+                  <div
+                    className={`calendar-event-content ${
+                      content.view.type === "dayGridMonth"
+                        ? "month-event-content"
+                        : "time-event-content"
+                    }`}
+                    style={{ "--event-color": eventColor } as React.CSSProperties}
+                  >
+                    <span
+                      className="event-kind-badge"
+                      style={
+                        {
+                          "--badge-color": kindColor,
+                        } as React.CSSProperties
+                      }
+                    >
+                      {meta.label}
+                    </span>
+                    {schedule.status !== "confirmed" && (
+                      <span
+                        className="event-kind-badge event-status-badge"
+                        style={
+                          {
+                            "--badge-color": STATUS_META[schedule.status].color,
+                          } as React.CSSProperties
+                        }
+                      >
+                        {STATUS_META[schedule.status].label}
+                      </span>
+                    )}
+                    <b>{schedule.instructor}</b>
+                    <span className="event-topic">
+                      {schedule.topic || meta.label}
+                    </span>
+                    {regionText(schedule) && (
+                      <span className="event-region">{regionText(schedule)}</span>
+                    )}
+                    <span className="event-time">
+                      {schedule.startTime ||
+                        (schedule.kind === "off" ? "종일" : "시간 미정")}
+                    </span>
+                  </div>
+                );
+              }}
+            />
+          </div>
+        </div>
+      </section>
+
+      {isEditorOpen && editorSchedule && (
+        <ScheduleEditor
+          key={`${editorSchedule.id || "new"}-${editorSchedule.date}`}
+          schedule={editorSchedule}
+          instructors={instructors}
+          mainLectures={mainLectures}
+          bulkDates={bulkEditorDates || undefined}
+          kindColors={kindColors}
+          isAdmin={isAdmin}
+          editable={canEdit(editorSchedule)}
+          currentInstructor={activeInstructor}
+          onClose={() => setIsEditorOpen(false)}
+          onSave={saveSchedule}
+          onBulkSave={saveBulkSchedules}
+          onDelete={deleteSchedule}
+        />
+      )}
+
+      {isImportOpen && (
+        <div className="modal-layer" role="presentation">
+          <button
+            className="modal-backdrop"
+            aria-label="엑셀 가져오기 닫기"
+            onClick={() => setIsImportOpen(false)}
+          />
+          <section className="import-modal" role="dialog" aria-modal="true" aria-label="엑셀 일정 가져오기">
+            <div className="modal-header">
+              <div className="modal-title-row">
+                <div className="modal-icon excel">
+                  <FileSpreadsheet size={21} />
+                </div>
+                <div>
+                  <span>표준 일정표</span>
+                  <h2>엑셀 일정 가져오기</h2>
+                </div>
+              </div>
+              <button className="icon-button" aria-label="닫기" onClick={() => setIsImportOpen(false)}>
+                <X size={19} />
+              </button>
+            </div>
+
+            <div className="import-settings">
+              <label>
+                <span>기준 연도</span>
+                <input
+                  type="number"
+                  value={importYear}
+                  min={2020}
+                  max={2100}
+                  onChange={(event) => setImportYear(Number(event.target.value))}
+                />
+                <small>
+                  엑셀 날짜에 연도가 없을 때만 사용합니다. 예: 08월 03일
+                </small>
+              </label>
+              <div className="import-auto-rule">
+                <span>자동 분류 규칙</span>
+                <strong>항목 일치 → 본강의 · 나머지 → 기타</strong>
+                <small>
+                  비고에 연기 또는 취소가 있으면 일정 상태는 취소가 됩니다.
+                </small>
+              </div>
+              <div className="import-keyword-setting">
+                <div className="import-keyword-heading">
+                  <div>
+                    <span>본강의 판별 항목</span>
+                    <small>비고에 아래 항목이 포함된 행만 본강의로 분류합니다.</small>
+                  </div>
+                  <b>{lectureKeywords.length}개</b>
+                </div>
+                <div className="import-keyword-chips">
+                  {lectureKeywords.length > 0 ? (
+                    lectureKeywords.map((keyword) => (
+                      <span key={keyword}>
+                        {keyword}
+                        <button
+                          type="button"
+                          aria-label={`${keyword} 항목 삭제`}
+                          onClick={() => removeLectureKeyword(keyword)}
+                        >
+                          <X size={13} />
+                        </button>
+                      </span>
+                    ))
+                  ) : (
+                    <small>등록된 항목이 없어 모든 행이 기타로 분류됩니다.</small>
+                  )}
+                </div>
+                <form
+                  className="import-keyword-entry"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    addLectureKeyword();
+                  }}
+                >
+                  <input
+                    value={lectureKeywordInput}
+                    aria-label="추가할 본강의 판별 항목"
+                    placeholder="추가할 항목 입력"
+                    onChange={(event) =>
+                      setLectureKeywordInput(event.target.value)
+                    }
+                  />
+                  <button
+                    type="submit"
+                    className="secondary-button"
+                    disabled={!lectureKeywordInput.trim()}
+                  >
+                    <Plus size={16} />
+                    추가
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            <label className={`upload-zone ${isParsing ? "is-loading" : ""}`}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={isParsing}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void parseWorkbook(file);
+                }}
+              />
+              <div className="upload-icon">
+                <Upload size={22} />
+              </div>
+              <div>
+                <strong>{isParsing ? "일정표 분석 중..." : importFileName || "엑셀 파일을 선택하세요"}</strong>
+                <span>.xlsx 표준 일정표 · 날짜와 시간을 자동 정리합니다.</span>
+              </div>
+              <em>파일 선택</em>
+            </label>
+
+            <div className="import-summary-line">
+              <CircleAlert size={16} />
+              <span>{importMessage}</span>
+            </div>
+
+            {importCandidates.length > 0 && (
+              <>
+                <div className="import-counts">
+                  {(
+                    [
+                      ["new", "신규"],
+                      ["update", "수정"],
+                      ["unchanged", "변경 없음"],
+                      ["error", "확인 필요"],
+                    ] as [ImportAction, string][]
+                  ).map(([action, label]) => (
+                    <div className={`import-count ${action}`} key={action}>
+                      <span>{label}</span>
+                      <b>{importCandidates.filter((item) => item.action === action).length}</b>
+                    </div>
+                  ))}
+                </div>
+                <div className="preview-table-wrap">
+                  <table className="preview-table">
+                    <thead>
+                      <tr>
+                        <th>결과</th>
+                        <th>행</th>
+                        <th>날짜</th>
+                        <th>강사</th>
+                        <th>종류</th>
+                        <th>시간</th>
+                        <th>지역·장소</th>
+                        <th>설명</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importCandidates.slice(0, 80).map((candidate) => (
+                        <tr key={candidate.key}>
+                          <td>
+                            <span className={`action-pill ${candidate.action}`}>
+                              {candidate.action === "new" && "신규"}
+                              {candidate.action === "update" && "수정"}
+                              {candidate.action === "unchanged" && "동일"}
+                              {candidate.action === "error" && "확인"}
+                            </span>
+                          </td>
+                          <td>{candidate.rowNumber || "-"}</td>
+                          <td>{candidate.schedule?.date || "-"}</td>
+                          <td>{candidate.schedule?.instructor || "-"}</td>
+                          <td>
+                            {candidate.schedule
+                              ? KIND_META[candidate.schedule.kind].label
+                              : "-"}
+                          </td>
+                          <td>
+                            {candidate.schedule?.startTime
+                              ? `${candidate.schedule.startTime}–${candidate.schedule.endTime}`
+                              : "-"}
+                          </td>
+                          <td>
+                            {[candidate.schedule?.region, candidate.schedule?.venue]
+                              .filter(Boolean)
+                              .join(" · ") || "-"}
+                          </td>
+                          <td>{candidate.message}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            <div className="modal-footer">
+              <button className="secondary-button" onClick={() => setIsImportOpen(false)}>
+                닫기
+              </button>
+              <button
+                className="primary-button"
+                disabled={
+                  isParsing ||
+                  !importCandidates.some(
+                    (item) => item.action !== "error" && item.schedule,
+                  )
+                }
+                onClick={applyImport}
+              >
+                <Check size={17} />
+                일정 반영
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function SortableInstructorColorRow({
+  instructor,
+  color,
+  canChangeColor,
+  canReorder,
+  onColorChange,
+}: {
+  instructor: string;
+  color: string;
+  canChangeColor: boolean;
+  canReorder: boolean;
+  onColorChange: (color: string) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: instructor, disabled: !canReorder });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`instructor-color-row ${
+        canChangeColor ? "" : "is-locked"
+      } ${isDragging ? "is-dragging" : ""}`}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+    >
+      <button
+        type="button"
+        className="drag-handle"
+        disabled={!canReorder}
+        aria-label={`${instructor} 강사 순서 이동`}
+        title={canReorder ? "드래그해서 강사 순서 변경" : "전체 관리자만 변경 가능"}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical size={18} />
+      </button>
+      <span
+        className="instructor-color-preview"
+        style={{ background: color }}
+      />
+      <span className="instructor-name">{instructor}</span>
+      <input
+        type="color"
+        value={color}
+        disabled={!canChangeColor}
+        aria-label={`${instructor} 강사 색상 선택`}
+        title={
+          canChangeColor
+            ? `${instructor} 강사 색상 선택`
+            : "본인 색상만 변경할 수 있습니다"
+        }
+        onChange={(event) => onColorChange(event.target.value)}
+      />
+    </div>
+  );
+}
+
+function ScheduleEditor({
+  schedule,
+  instructors,
+  mainLectures,
+  bulkDates,
+  kindColors,
+  isAdmin,
+  editable,
+  currentInstructor,
+  onClose,
+  onSave,
+  onBulkSave,
+  onDelete,
+}: {
+  schedule: Schedule;
+  instructors: string[];
+  mainLectures: Schedule[];
+  bulkDates?: string[];
+  kindColors: Record<ScheduleKind, string>;
+  isAdmin: boolean;
+  editable: boolean;
+  currentInstructor?: string;
+  onClose: () => void;
+  onSave: (schedule: Schedule) => void;
+  onBulkSave: (
+    schedule: Schedule,
+    dates: string[],
+    parentScheduleIds: Record<string, string>,
+  ) => void;
+  onDelete: (schedule: Schedule) => void;
+}) {
+  const [form, setForm] = useState(schedule);
+  const [bulkParentScheduleIds, setBulkParentScheduleIds] = useState<
+    Record<string, string>
+  >({});
+  const isNew = !schedule.id;
+  const isBulk = Boolean(bulkDates?.length);
+  const [showDetails, setShowDetails] = useState(!isNew);
+  const [attemptedSave, setAttemptedSave] = useState(false);
+  const isOff = form.kind === "off";
+  const isOffice = form.kind === "office";
+  const isOther = form.kind === "other";
+  const isAssistant = form.kind === "assistant";
+  const isBulkAssistant = isBulk && isAssistant;
+  const availableMainLectures = useMemo(
+    () =>
+      mainLectures.filter(
+        (lecture) =>
+          lecture.id !== schedule.id && lecture.date === form.date,
+      ),
+    [form.date, mainLectures, schedule.id],
+  );
+  const selectedMainLecture = availableMainLectures.find(
+    (lecture) => lecture.id === form.parentScheduleId,
+  );
+  const hasAllBulkParentLectures = Boolean(
+    bulkDates?.every((date) => {
+      const selectedId = bulkParentScheduleIds[date];
+      return mainLectures.some(
+        (lecture) =>
+          lecture.id === selectedId &&
+          lecture.date === date &&
+          lecture.status !== "cancelled",
+      );
+    }),
+  );
+  const hasPartialTime = Boolean(form.startTime) !== Boolean(form.endTime);
+  const hasInvalidTime = Boolean(
+    form.startTime && form.endTime && form.endTime <= form.startTime,
+  );
+  const needsOtherDescription = isOther && !form.topic?.trim();
+  const needsParentLecture =
+    isAssistant &&
+    (isBulk ? !hasAllBulkParentLectures : !selectedMainLecture);
+  const canSubmit = Boolean(
+    form.date &&
+      form.instructor &&
+      !needsOtherDescription &&
+      !needsParentLecture &&
+      !hasPartialTime &&
+      !hasInvalidTime,
+  );
+  const arrivalTime = calculateArrival(form.startTime, form.arrivalMinutes);
+  const lockedInstructor = !isAdmin && currentInstructor;
+
+  function update<K extends keyof Schedule>(key: K, value: Schedule[K]) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function chooseKind(kind: ScheduleKind) {
+    if (kind === "assistant" && bulkDates) {
+      const automaticParents = Object.fromEntries(
+        bulkDates.flatMap((date) => {
+          const candidates = mainLectures.filter(
+            (lecture) =>
+              lecture.date === date && lecture.status !== "cancelled",
+          );
+          return candidates.length === 1 ? [[date, candidates[0].id]] : [];
+        }),
+      );
+      setBulkParentScheduleIds(automaticParents);
+    } else if (kind !== "assistant") {
+      setBulkParentScheduleIds({});
+    }
+    setForm((current) => ({
+      ...current,
+      kind,
+      ...(kind !== "assistant" ? { parentScheduleId: undefined } : {}),
+      ...(kind === "office" ? { region: undefined } : {}),
+      ...(kind === "off"
+        ? {
+            startTime: undefined,
+            endTime: undefined,
+            region: undefined,
+            venue: undefined,
+            session: "종일",
+            arrivalMinutes: 0,
+          }
+        : {}),
+    }));
+  }
+
+  function chooseParentLecture(parentScheduleId: string) {
+    const parentLecture = availableMainLectures.find(
+      (lecture) => lecture.id === parentScheduleId,
+    );
+    if (!parentLecture) {
+      update("parentScheduleId", undefined);
+      return;
+    }
+    setForm((current) => ({
+      ...current,
+      parentScheduleId: parentLecture.id,
+      date: parentLecture.date,
+      startTime: parentLecture.startTime,
+      endTime: parentLecture.endTime,
+      region: parentLecture.region,
+      venue: parentLecture.venue,
+      session: parentLecture.session || deriveSession(parentLecture.startTime),
+      topic: parentLecture.topic,
+      status: parentLecture.status,
+    }));
+  }
+
+  function submit() {
+    setAttemptedSave(true);
+    if (!canSubmit) return;
+    const normalizedForm =
+      form.kind === "office" || form.kind === "off"
+        ? { ...form, region: undefined }
+        : form;
+    if (isBulk && bulkDates) {
+      onBulkSave(normalizedForm, bulkDates, bulkParentScheduleIds);
+      return;
+    }
+    onSave(normalizedForm);
+  }
+
+  return (
+    <div className="drawer-layer" role="presentation">
+      <button className="drawer-backdrop" aria-label="일정 닫기" onClick={onClose} />
+      <section className="schedule-drawer" role="dialog" aria-modal="true" aria-label="일정 상세">
+        <div className="drawer-header">
+          <div>
+            <span>{isBulk ? "여러 날짜 일정" : isNew ? "새로운 일정" : "일정 상세"}</span>
+            <h2>
+              {isBulk
+                ? `${bulkDates?.length || 0}개 날짜 일괄 등록`
+                : isNew
+                  ? "일정 등록"
+                  : form.topic || KIND_META[form.kind].label}
+            </h2>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="닫기">
+            <X size={19} />
+          </button>
+        </div>
+
+        {!editable && (
+          <div className="permission-notice">
+            <ShieldCheck size={17} />
+            다른 강사의 일정은 조회만 가능합니다.
+          </div>
+        )}
+
+        <div className="drawer-body">
+          <div className="form-section-heading">
+            <div>
+              <span>필수 정보</span>
+              <strong>
+                {isBulk
+                  ? "선택한 날짜에 공통으로 적용할 내용을 입력하세요"
+                  : "일정의 핵심 내용부터 입력하세요"}
+              </strong>
+            </div>
+            <small>* 기타 일정 내용은 필수입니다.</small>
+          </div>
+
+          <div className="field full">
+            <span>일정 종류</span>
+            <div className="kind-choice-grid">
+              {(Object.keys(KIND_META) as ScheduleKind[]).map((kind) => {
+                const active = form.kind === kind;
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    disabled={!editable}
+                    className={active ? "active" : ""}
+                    style={
+                      {
+                        "--choice-color": kindColors[kind],
+                        borderColor: active ? kindColors[kind] : undefined,
+                      } as React.CSSProperties
+                    }
+                    onClick={() => chooseKind(kind)}
+                  >
+                    <span style={{ background: kindColors[kind] }} />
+                    {KIND_META[kind].label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <label className="field full">
+            <span>담당 강사</span>
+            <div className="field-with-icon">
+              <UserRound size={16} />
+              <select
+                value={lockedInstructor || form.instructor}
+                disabled={!editable || !isAdmin}
+                onChange={(event) => update("instructor", event.target.value)}
+              >
+                {instructors.map((instructor) => (
+                  <option key={instructor} value={instructor}>
+                    {instructor}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+
+          {isBulk ? (
+            <div className="bulk-date-summary">
+              <div>
+                <CalendarDays size={18} />
+                <strong>선택한 날짜 {bulkDates?.length || 0}개</strong>
+              </div>
+              <div className="bulk-date-chips">
+                {bulkDates?.map((date) => <span key={date}>{date}</span>)}
+              </div>
+            </div>
+          ) : (
+            <label className="field full">
+              <span>날짜</span>
+              <input
+                type="date"
+                value={form.date}
+                disabled={!editable}
+                onChange={(event) => {
+                  const date = event.target.value;
+                  setForm((current) => {
+                    const linkedLecture = mainLectures.find(
+                      (lecture) => lecture.id === current.parentScheduleId,
+                    );
+                    return {
+                      ...current,
+                      date,
+                      parentScheduleId:
+                        linkedLecture && linkedLecture.date === date
+                          ? current.parentScheduleId
+                          : undefined,
+                    };
+                  });
+                }}
+              />
+            </label>
+          )}
+
+          {isAssistant && (
+            <div className="parent-lecture-panel">
+              <div className="parent-lecture-heading">
+                <div>
+                  <Link2 size={17} />
+                  <strong>{isBulk ? "날짜별 연결할 본강의" : "연결할 본강의"}</strong>
+                </div>
+                <span>필수</span>
+              </div>
+              {isBulk ? (
+                <div className="bulk-parent-lecture-list">
+                  {bulkDates?.map((date) => {
+                    const candidates = mainLectures.filter(
+                      (lecture) =>
+                        lecture.date === date && lecture.status !== "cancelled",
+                    );
+                    return (
+                      <label className="bulk-parent-lecture-row" key={date}>
+                        <span>{date}</span>
+                        <select
+                          value={bulkParentScheduleIds[date] || ""}
+                          disabled={!editable || candidates.length === 0}
+                          onChange={(event) =>
+                            setBulkParentScheduleIds((current) => ({
+                              ...current,
+                              [date]: event.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">
+                            {candidates.length > 0
+                              ? "본강의를 선택하세요"
+                              : "해당 날짜에 본강의가 없습니다"}
+                          </option>
+                          {candidates.map((lecture) => (
+                            <option key={lecture.id} value={lecture.id}>
+                              {parentLectureLabel(lecture)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <label className="field full">
+                  <span>본강의 선택</span>
+                  <select
+                    value={selectedMainLecture?.id || ""}
+                    disabled={!editable || availableMainLectures.length === 0}
+                    onChange={(event) => chooseParentLecture(event.target.value)}
+                  >
+                    <option value="">
+                      {availableMainLectures.length > 0
+                        ? "본강의를 선택하세요"
+                        : "이 날짜에는 등록된 본강의가 없습니다"}
+                    </option>
+                    {availableMainLectures.map((lecture) => (
+                      <option
+                        key={lecture.id}
+                        value={lecture.id}
+                        disabled={
+                          lecture.status === "cancelled" &&
+                          lecture.id !== form.parentScheduleId
+                        }
+                      >
+                        {parentLectureLabel(lecture)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <small>
+                {isBulk
+                  ? "후보가 하나뿐인 날짜는 자동 선택됩니다. 각 본강의의 시간, 지역, 장소, 강의명과 상태가 적용됩니다."
+                  : "선택한 본강의의 날짜, 시간, 지역, 장소, 강의명과 상태를 가져옵니다. 가져온 내용은 아래에서 개별 수정할 수 있습니다."}
+              </small>
+              {!isBulk && selectedMainLecture && (
+                <div className="parent-lecture-summary">
+                  <span>연결됨</span>
+                  <strong>{selectedMainLecture.topic || "본강의"}</strong>
+                  <small>
+                    {selectedMainLecture.instructor} · {selectedMainLecture.date} · {selectedMainLecture.startTime || "시간 미정"}
+                  </small>
+                </div>
+              )}
+              {attemptedSave && needsParentLecture && (
+                <small className="field-error">연결할 본강의를 선택해주세요.</small>
+              )}
+            </div>
+          )}
+
+          {!isOff && !isBulkAssistant && (
+            <>
+              <div className="field-grid">
+                <label className="field">
+                  <span>시작 시간</span>
+                  <input
+                    type="time"
+                    value={form.startTime || ""}
+                    disabled={!editable}
+                    onChange={(event) => {
+                      const startTime = event.target.value || undefined;
+                      setForm((current) => ({
+                        ...current,
+                        startTime,
+                        session: deriveSession(startTime),
+                      }));
+                    }}
+                  />
+                </label>
+                <label className="field">
+                  <span>종료 시간</span>
+                  <input
+                    type="time"
+                    value={form.endTime || ""}
+                    disabled={!editable}
+                    onChange={(event) =>
+                      update("endTime", event.target.value || undefined)
+                    }
+                  />
+                </label>
+              </div>
+              <small className="field-helper">
+                시간을 모르면 시작·종료 시간을 모두 비워두세요.
+              </small>
+              {(hasPartialTime || hasInvalidTime) && (
+                <small className="field-error">
+                  {hasPartialTime
+                    ? "시작 시간과 종료 시간을 모두 입력하거나 모두 비워주세요."
+                    : "종료 시간은 시작 시간보다 늦어야 합니다."}
+                </small>
+              )}
+            </>
+          )}
+
+          {!isOff && !isOffice && !isBulkAssistant && (
+            <label className="field full">
+              <span>지역</span>
+              <input
+                value={form.region || ""}
+                disabled={!editable}
+                placeholder="비워두면 지역 미정으로 표시됩니다."
+                onChange={(event) => update("region", event.target.value)}
+              />
+            </label>
+          )}
+
+          {!isBulkAssistant && (
+            <>
+              <label className="field full">
+                <span>
+                  {isOther
+                    ? "기타 일정 내용 *"
+                    : isOff
+                      ? "휴무 사유"
+                      : "강의명·업무명"}
+                </span>
+                <input
+                  value={form.topic || ""}
+                  disabled={!editable}
+                  placeholder={
+                    isOther
+                      ? "예: 팀 회의, 외부 행사, 장비 점검"
+                      : isOff
+                        ? "예: 연차, 대체 휴무"
+                        : "예: 제미나이, 클로드, 교안 정리"
+                  }
+                  onChange={(event) => update("topic", event.target.value)}
+                />
+              </label>
+              {attemptedSave && needsOtherDescription && (
+                <small className="field-error">기타 일정 내용을 입력해주세요.</small>
+              )}
+            </>
+          )}
+
+          {!isBulkAssistant && (
+            <>
+              <button
+                type="button"
+                className="details-toggle"
+                aria-expanded={showDetails}
+                onClick={() => setShowDetails((current) => !current)}
+              >
+                <div>
+                  <strong>상세 정보</strong>
+                  <span>상태, 장소, 도착 준비 시간, 메모</span>
+                </div>
+                <ChevronRight
+                  size={20}
+                  className={showDetails ? "is-open" : ""}
+                />
+              </button>
+
+              {showDetails && (
+                <div className="optional-fields">
+              <div className="status-choice">
+                {(Object.keys(STATUS_META) as ScheduleStatus[]).map((status) => (
+                  <button
+                    key={status}
+                    type="button"
+                    disabled={!editable}
+                    className={form.status === status ? "active" : ""}
+                    style={{
+                      borderColor:
+                        form.status === status
+                          ? STATUS_META[status].color
+                          : undefined,
+                      color:
+                        form.status === status
+                          ? STATUS_META[status].color
+                          : undefined,
+                      background:
+                        form.status === status
+                          ? `${STATUS_META[status].color}12`
+                          : undefined,
+                    }}
+                    onClick={() => update("status", status)}
+                  >
+                    <span style={{ background: STATUS_META[status].color }} />
+                    {STATUS_META[status].label}
+                  </button>
+                ))}
+              </div>
+
+              {!isOff && (
+                <>
+                  <label className="field full">
+                    <span>장소</span>
+                    <div className="field-with-icon">
+                      <MapPin size={18} />
+                      <input
+                        value={form.venue || ""}
+                        disabled={!editable}
+                        placeholder="장소 또는 미정"
+                        onChange={(event) => update("venue", event.target.value)}
+                      />
+                    </div>
+                  </label>
+
+                  <div className="field-grid">
+                    <label className="field">
+                      <span>시간대</span>
+                      <select
+                        value={form.session || deriveSession(form.startTime)}
+                        disabled={!editable}
+                        onChange={(event) => update("session", event.target.value)}
+                      >
+                        <option value="종일">시간 미정</option>
+                        <option value="오전">오전</option>
+                        <option value="오후">오후</option>
+                        <option value="야간">야간</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>도착 준비 시간</span>
+                      <select
+                        value={form.arrivalMinutes}
+                        disabled={!editable}
+                        onChange={(event) =>
+                          update("arrivalMinutes", Number(event.target.value))
+                        }
+                      >
+                        <option value={0}>설정 안 함</option>
+                        <option value={15}>15분 전</option>
+                        <option value={30}>30분 전</option>
+                        <option value={45}>45분 전</option>
+                        <option value={60}>60분 전</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  {arrivalTime && (
+                    <div className="arrival-callout">
+                      <Clock3 size={19} />
+                      <div>
+                        <span>권장 도착 시각</span>
+                        <b>{arrivalTime}</b>
+                        <small>시작 {form.arrivalMinutes}분 전</small>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              <label className="field full">
+                <span>메모</span>
+                <textarea
+                  value={form.note || ""}
+                  disabled={!editable}
+                  rows={4}
+                  placeholder="담당자 전달사항을 입력하세요."
+                  onChange={(event) => update("note", event.target.value)}
+                />
+              </label>
+                </div>
+              )}
+            </>
+          )}
+
+          {isBulkAssistant && (
+            <label className="field full bulk-common-note">
+              <span>공통 메모</span>
+              <textarea
+                value={form.note || ""}
+                disabled={!editable}
+                rows={4}
+                placeholder="선택한 모든 보조강의에 적용할 메모를 입력하세요."
+                onChange={(event) => update("note", event.target.value)}
+              />
+              <small>
+                시간, 지역, 장소, 강의명과 상태는 날짜별 본강의를 그대로 따릅니다.
+              </small>
+            </label>
+          )}
+
+          {!isNew && (
+            <div className="source-line">
+              <span>등록 경로</span>
+              <b>{form.source === "excel" ? "엑셀 가져오기" : "직접 등록"}</b>
+            </div>
+          )}
+        </div>
+
+        <div className="drawer-footer">
+          {!isNew && editable && (
+            <button className="danger-button" onClick={() => onDelete(form)}>
+              {isAdmin ? "삭제" : "일정 취소"}
+            </button>
+          )}
+          <div className="drawer-footer-spacer" />
+          <button className="secondary-button" onClick={onClose}>
+            닫기
+          </button>
+          {editable && (
+            <button
+              className="primary-button"
+              disabled={
+                !form.date ||
+                !form.instructor ||
+                hasPartialTime ||
+                hasInvalidTime
+              }
+              onClick={submit}
+            >
+              <Check size={17} />
+              {isBulk
+                ? `${bulkDates?.length || 0}개 등록`
+                : isNew
+                  ? "등록"
+                  : "저장"}
+            </button>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
