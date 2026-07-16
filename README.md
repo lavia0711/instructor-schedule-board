@@ -1,6 +1,6 @@
 # 강사 일정 보드
 
-회사 내부에서 강사별 강의, 보조강의, 사무실 출근, 휴무와 기타 일정을 한 화면에서 관리하는 웹앱 프로토타입입니다.
+회사 내부에서 강사별 강의, 보조강의, 사무실 출근, 휴무와 기타 일정을 한 화면에서 관리하는 웹앱입니다.
 
 ## 주요 기능
 
@@ -11,20 +11,45 @@
 - 보조강의와 같은 날짜의 본강의 연결
 - 표준 엑셀 일정표 가져오기 및 신규·수정·동일 항목 비교
 - 엑셀 비고에 따른 본강의·기타·취소 자동 분류
-- 전체 관리자와 강사별 수정 권한 미리보기
+- Supabase Auth 로그인, Realtime 동기화, 역할별 수정 권한
+- Supabase가 없을 때 브라우저 `localStorage`를 사용하는 로컬 프로토타입 모드
 
-현재 프로토타입의 일정과 화면 설정은 브라우저 로컬 저장소에 보관됩니다. 여러 사용자가 실시간으로 같은 데이터를 공유하려면 추후 데이터베이스와 로그인 연동이 필요합니다.
+## 사용 기술
 
-## 실행
+- React 19, Vinext, TypeScript
+- FullCalendar
+- Supabase Database, Auth, Realtime, RLS
+- ExcelJS
+- dnd-kit
+
+## 빠른 실행
 
 Node.js 22.13 이상이 필요합니다.
 
 ```bash
 npm install
+copy .env.example .env.local
 npm run dev
 ```
 
-브라우저에서 개발 서버가 안내하는 로컬 주소를 열면 됩니다.
+`.env.local`에 실제 Supabase 프로젝트 값을 입력합니다.
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
+```
+
+연결값이 없으면 기존처럼 로컬 프로토타입 모드로 실행됩니다. Secret Key, `service_role` 키, DB 비밀번호는 브라우저 환경변수나 Git 저장소에 넣지 않습니다.
+
+## Supabase 연결
+
+처음 연결하거나 회사 계정으로 포크해 연결하는 절차는 [Supabase 설정 안내](docs/SUPABASE_SETUP.md)를 따르세요.
+
+```bash
+npx supabase login
+npx supabase link --project-ref YOUR_PROJECT_REF
+npx supabase db push
+```
 
 ## 검사
 
@@ -32,3 +57,22 @@ npm run dev
 npm run lint
 npm test
 ```
+
+Docker Desktop이 실행 중이면 DB 마이그레이션과 실제 RLS 권한도 검증할 수 있습니다.
+
+```bash
+npm run supabase:start
+npm run supabase:reset
+npm run supabase:lint
+
+# `supabase status -o env`의 로컬 값을 환경변수에 등록한 뒤 실행
+npm run supabase:verify
+```
+
+## 저장 범위
+
+Supabase에는 일정, 강사 색상·정렬, 일정 종류 색상, 엑셀 판별 항목, 사용자 권한이 저장됩니다. 검색어, 현재 필터, 보고 있는 달력 화면 같은 개인 UI 상태는 서버에 저장하지 않습니다.
+
+## 라이선스
+
+[MIT](LICENSE)
