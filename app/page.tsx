@@ -52,7 +52,14 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
 import type {
   Schedule,
   ScheduleKind,
@@ -60,6 +67,7 @@ import type {
   UserProfile,
 } from "@/lib/schedule-types";
 import { formatAuthError } from "@/lib/auth-error";
+import { cascadeCancelledLectureAssistants } from "@/lib/schedule-cancellation";
 import {
   assistantAssignmentStatus,
   normalizeAssistantRequirement,
@@ -519,7 +527,14 @@ function emptySchedule(date = TODAY, instructor = ""): Schedule {
 export default function Home() {
   const calendarRef = useRef<FullCalendar | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedules, setScheduleState] = useState<Schedule[]>([]);
+  const setSchedules = useCallback((next: SetStateAction<Schedule[]>) => {
+    setScheduleState((current) =>
+      cascadeCancelledLectureAssistants(
+        typeof next === "function" ? next(current) : next,
+      ),
+    );
+  }, []);
   const [instructorColors, setInstructorColors] = useState<Record<string, string>>(
     INSTRUCTOR_COLOR_OVERRIDES,
   );
@@ -611,7 +626,7 @@ export default function Home() {
         : `instructor:${profile.instructorName || ""}`,
     );
     setHydrated(true);
-  }, []);
+  }, [setSchedules]);
 
   useEffect(() => {
     if (isSupabaseConfigured) return;
@@ -678,7 +693,7 @@ export default function Home() {
       setHydrated(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [setSchedules]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -757,7 +772,7 @@ export default function Home() {
       stopRealtime?.();
       authListener.subscription.unsubscribe();
     };
-  }, [hydrateRemoteWorkspace]);
+  }, [hydrateRemoteWorkspace, setSchedules]);
 
   useEffect(() => {
     if (hydrated && !isSupabaseConfigured) {

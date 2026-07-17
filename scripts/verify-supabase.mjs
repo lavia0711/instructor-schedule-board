@@ -136,7 +136,7 @@ try {
         schedule_date: "2026-07-17",
         start_time: "10:00",
         end_time: "11:00",
-        instructor: instructorName,
+        instructor: otherInstructorName,
         kind: "assistant",
         status: "confirmed",
         parent_schedule_id: ownScheduleId,
@@ -204,6 +204,30 @@ try {
     otherUpdate.length,
     0,
     "instructor must not update another instructor's schedule",
+  );
+
+  const cancelledLecture = ensure(
+    await instructorClient
+      .from("schedules")
+      .update({ status: "cancelled" })
+      .eq("id", ownScheduleId)
+      .select("id"),
+    "cancel own lecture",
+  );
+  assert.equal(cancelledLecture.length, 1, "instructor should cancel own lecture");
+
+  const cascadedAssistant = ensure(
+    await instructorClient
+      .from("schedules")
+      .select("status")
+      .eq("id", assistantScheduleId)
+      .single(),
+    "read cascaded assistant status",
+  );
+  assert.equal(
+    cascadedAssistant.status,
+    "cancelled",
+    "cancelling a lecture should cancel its linked assistant across RLS ownership",
   );
 
   const forbiddenInsert = await instructorClient.from("schedules").insert({
