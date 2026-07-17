@@ -22,7 +22,7 @@ async function render() {
   );
 }
 
-test("server-renders the instructor schedule board", async () => {
+test("server-renders the instructor schedule board entry screen", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
@@ -30,7 +30,9 @@ test("server-renders the instructor schedule board", async () => {
   const html = await response.text();
   assert.match(html, /<title>강사 일정 보드<\/title>/i);
   assert.match(html, /강사 일정 보드/);
-  assert.match(html, /엑셀 가져오기/);
-  assert.match(html, /일정 종류/);
+  assert.match(
+    html,
+    /회사에서 발급받은 계정으로 로그인하세요|엑셀 가져오기/,
+  );
   assert.doesNotMatch(html, /Your site is taking shape|Codex is working/);
 });

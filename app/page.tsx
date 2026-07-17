@@ -59,6 +59,7 @@ import type {
   ScheduleStatus,
   UserProfile,
 } from "@/lib/schedule-types";
+import { formatAuthError } from "@/lib/auth-error";
 import {
   assistantAssignmentStatus,
   normalizeAssistantRequirement,
@@ -707,11 +708,7 @@ export default function Home() {
       } catch (error) {
         if (!active) return;
         setCurrentProfile(null);
-        setLoginError(
-          error instanceof Error
-            ? `서버 초기화 실패: ${error.message}`
-            : "서버 초기화에 실패했습니다.",
-        );
+        setLoginError(formatAuthError(error, "서버 초기화에 실패했습니다."));
       } finally {
         if (active) {
           setAuthReady(true);
@@ -724,7 +721,7 @@ export default function Home() {
     void client.auth.getSession().then(({ data, error }) => {
       if (!active) return;
       if (error) {
-        setLoginError(error.message);
+        setLoginError(formatAuthError(error));
         setAuthReady(true);
         return;
       }
@@ -1692,12 +1689,17 @@ export default function Home() {
     if (!client) return;
     setIsLoginLoading(true);
     setLoginError("");
-    const { error } = await client.auth.signInWithPassword({
-      email: loginEmail.trim(),
-      password: loginPassword,
-    });
-    if (error) {
-      setLoginError(error.message);
+    try {
+      const { error } = await client.auth.signInWithPassword({
+        email: loginEmail.trim(),
+        password: loginPassword,
+      });
+      if (error) {
+        setLoginError(formatAuthError(error));
+      }
+    } catch (error) {
+      setLoginError(formatAuthError(error));
+    } finally {
       setIsLoginLoading(false);
     }
   }
