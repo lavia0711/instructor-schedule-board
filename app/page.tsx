@@ -3,6 +3,7 @@
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import interactionPlugin, { type DateClickArg } from "@fullcalendar/interaction";
+import listPlugin from "@fullcalendar/list";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import type {
   DatesSetArg,
@@ -69,6 +70,11 @@ import type {
 import { formatAuthError } from "@/lib/auth-error";
 import { cascadeCancelledLectureAssistants } from "@/lib/schedule-cancellation";
 import {
+  calendarDisplayView,
+  logicalCalendarView,
+  type CalendarView,
+} from "@/lib/calendar-responsive";
+import {
   assistantAssignmentStatus,
   normalizeAssistantRequirement,
   preserveImportedAssistantRequirement,
@@ -89,7 +95,6 @@ import {
 } from "@/lib/supabase/schedule-repository";
 
 type RoleKey = "admin" | `instructor:${string}`;
-type CalendarView = "dayGridMonth" | "timeGridWeek" | "timeGridDay";
 
 type ImportAction = "new" | "update" | "unchanged" | "error";
 
@@ -549,6 +554,12 @@ export default function Home() {
   const [calendarView, setCalendarView] =
     useState<CalendarView>("dayGridMonth");
   const [calendarTitle, setCalendarTitle] = useState("2026년 7월");
+  const [isMobileLayout, setIsMobileLayout] = useState(false);
+  const [isMobileLayoutReady, setIsMobileLayoutReady] = useState(false);
+  const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
+  const [isMobileFilterMotionEnabled, setIsMobileFilterMotionEnabled] =
+    useState(false);
+  const [mobileSelectedDate, setMobileSelectedDate] = useState(TODAY);
   const [instructorFilter, setInstructorFilter] = useState("all");
   const [kindFilters, setKindFilters] = useState<ScheduleKind[]>([
     "lecture",
@@ -598,6 +609,55 @@ export default function Home() {
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+
+  const setMobileFiltersOpenWithMotion = useCallback((open: boolean) => {
+    setIsMobileFilterMotionEnabled(true);
+    setIsMobileFiltersOpen(open);
+  }, []);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 820px)");
+    const syncLayout = () => {
+      setIsMobileLayout(mediaQuery.matches);
+      setIsMobileLayoutReady(true);
+      setIsMobileFilterMotionEnabled(false);
+      setIsMobileFiltersOpen(false);
+    };
+    syncLayout();
+    mediaQuery.addEventListener("change", syncLayout);
+    return () => mediaQuery.removeEventListener("change", syncLayout);
+  }, []);
+
+  useEffect(() => {
+    const calendar = calendarRef.current?.getApi();
+    if (!calendar) return;
+    const displayView = calendarDisplayView(calendarView, isMobileLayout);
+    if (calendar.view.type !== displayView) {
+      calendar.changeView(displayView);
+    }
+  }, [calendarView, isMobileLayout]);
+
+  useEffect(() => {
+    if (!isMobileFiltersOpen && !isEditorOpen && !isImportOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const previousRootOverflow = document.documentElement.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileFiltersOpenWithMotion(false);
+    };
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.documentElement.style.overflow = previousRootOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [
+    isEditorOpen,
+    isImportOpen,
+    isMobileFiltersOpen,
+    setMobileFiltersOpenWithMotion,
+  ]);
 
   const hydrateRemoteWorkspace = useCallback(async (userId: string) => {
     const [workspace, profile] = await Promise.all([
@@ -1061,9 +1121,25 @@ export default function Home() {
       item.date <= weekRange.end,
   ).length;
 
+  const mobileSelectedSchedules = useMemo(
+    () =>
+      filteredSchedules
+        .filter((schedule) => schedule.date === mobileSelectedDate)
+        .sort((a, b) => {
+          const timeOrder = (a.startTime || "99:99").localeCompare(
+            b.startTime || "99:99",
+          );
+          if (timeOrder !== 0) return timeOrder;
+          return instructors.indexOf(a.instructor) - instructors.indexOf(b.instructor);
+        }),
+    [filteredSchedules, instructors, mobileSelectedDate],
+  );
+
   function changeView(view: CalendarView) {
     setCalendarView(view);
-    calendarRef.current?.getApi().changeView(view);
+    calendarRef.current
+      ?.getApi()
+      .changeView(calendarDisplayView(view, isMobileLayout));
   }
 
   function showCurrentWeek() {
@@ -1103,6 +1179,17 @@ export default function Home() {
     setIsEditorOpen(true);
   }
 
+  function openScheduleForVisibleDate() {
+    const calendarDate = calendarRef.current?.getApi().getDate();
+    openNewSchedule(
+      calendarView === "dayGridMonth"
+        ? mobileSelectedDate
+        : calendarDate
+          ? isoFromLocalDate(calendarDate)
+          : TODAY,
+    );
+  }
+
   function toggleBulkDate(date: string) {
     setBulkSelectedDates((current) =>
       current.includes(date)
@@ -1131,9 +1218,7 @@ export default function Home() {
     setIsEditorOpen(true);
   }
 
-  function handleEventClick(info: EventClickArg) {
-    const schedule = schedules.find((item) => item.id === info.event.id);
-    if (!schedule) return;
+  function handleScheduleClick(schedule: Schedule) {
     if (isBulkSelectionMode) {
       if (
         schedule.kind === "lecture" &&
@@ -1155,9 +1240,18 @@ export default function Home() {
     setIsEditorOpen(true);
   }
 
+  function handleEventClick(info: EventClickArg) {
+    const schedule = schedules.find((item) => item.id === info.event.id);
+    if (schedule) handleScheduleClick(schedule);
+  }
+
   function handleDateClick(info: DateClickArg) {
     if (isBulkSelectionMode) {
       toggleBulkDate(info.dateStr.slice(0, 10));
+      return;
+    }
+    if (isMobileLayout && calendarView === "dayGridMonth") {
+      setMobileSelectedDate(info.dateStr.slice(0, 10));
       return;
     }
     openNewSchedule(
@@ -1168,13 +1262,8 @@ export default function Home() {
 
   function handleDatesSet(info: DatesSetArg) {
     setCalendarTitle(info.view.title);
-    if (
-      info.view.type === "dayGridMonth" ||
-      info.view.type === "timeGridWeek" ||
-      info.view.type === "timeGridDay"
-    ) {
-      setCalendarView(info.view.type);
-    }
+    const logicalView = logicalCalendarView(info.view.type);
+    if (logicalView) setCalendarView(logicalView);
   }
 
   async function saveSchedule(schedule: Schedule) {
@@ -1744,8 +1833,27 @@ export default function Home() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
+    <main
+      className={`app-shell ${
+        isMobileFiltersOpen ? "mobile-filters-open" : ""
+      } ${isMobileFilterMotionEnabled ? "mobile-filter-motion" : ""} ${
+        isMobileLayoutReady ? "mobile-layout-ready" : ""
+      }`}
+    >
+      {isMobileFiltersOpen && (
+        <button
+          type="button"
+          className="mobile-sidebar-backdrop"
+          aria-label="필터 닫기"
+          onClick={() => setMobileFiltersOpenWithMotion(false)}
+        />
+      )}
+      <aside
+        className="sidebar"
+        role={isMobileLayout ? "dialog" : undefined}
+        aria-modal={isMobileLayout ? true : undefined}
+        aria-label={isMobileLayout ? "일정 필터" : undefined}
+      >
         <div className="brand-row">
           <div className="brand-mark">
             <CalendarDays size={20} />
@@ -1754,6 +1862,14 @@ export default function Home() {
             <strong>강사 일정 보드</strong>
             <span>사내 통합 스케줄</span>
           </div>
+          <button
+            type="button"
+            className="mobile-sidebar-close"
+            aria-label="필터 닫기"
+            onClick={() => setMobileFiltersOpenWithMotion(false)}
+          >
+            <X size={19} />
+          </button>
         </div>
 
         <button className="primary-action" onClick={() => openNewSchedule()}>
@@ -2098,6 +2214,14 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
+          <button
+            type="button"
+            className="mobile-filter-button"
+            aria-label="필터 열기"
+            onClick={() => setMobileFiltersOpenWithMotion(true)}
+          >
+            <Filter size={19} />
+          </button>
           <div className="search-box">
             <Search size={17} />
             <input
@@ -2317,18 +2441,24 @@ export default function Home() {
           <div className="calendar-stage">
             <FullCalendar
               ref={calendarRef}
-              plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin]}
+              plugins={[
+                dayGridPlugin,
+                timeGridPlugin,
+                listPlugin,
+                interactionPlugin,
+              ]}
               initialView="dayGridMonth"
               initialDate={TODAY}
               headerToolbar={false}
               locale="ko"
+              noEventsContent="표시할 일정이 없습니다."
               firstDay={0}
-              height="100%"
-              expandRows
+              height={isMobileLayout ? "auto" : "100%"}
+              expandRows={!isMobileLayout}
               nowIndicator
               navLinks={false}
               selectable
-              dayMaxEvents={3}
+              dayMaxEvents={isMobileLayout ? 4 : 3}
               moreLinkText={(count) => `+${count}개`}
               allDayText="시간 미정·종일"
               slotMinTime="08:00:00"
@@ -2339,11 +2469,19 @@ export default function Home() {
               events={calendarEvents}
               eventOrder="start,instructorRank"
               eventOrderStrict
-              dayCellClassNames={(info) =>
-                bulkSelectedDates.includes(isoFromLocalDate(info.date))
-                  ? ["bulk-selected-day"]
-                  : []
-              }
+              dayCellClassNames={(info) => {
+                const date = isoFromLocalDate(info.date);
+                return [
+                  ...(bulkSelectedDates.includes(date)
+                    ? ["bulk-selected-day"]
+                    : []),
+                  ...(isMobileLayout &&
+                  calendarView === "dayGridMonth" &&
+                  mobileSelectedDate === date
+                    ? ["mobile-selected-day"]
+                    : []),
+                ];
+              }}
               dateClick={handleDateClick}
               eventClick={handleEventClick}
               datesSet={handleDatesSet}
@@ -2405,7 +2543,9 @@ export default function Home() {
                     className={`calendar-event-content ${
                       content.view.type === "dayGridMonth"
                         ? "month-event-content"
-                        : "time-event-content"
+                        : content.view.type === "listWeek"
+                          ? "list-event-content"
+                          : "time-event-content"
                     }`}
                     style={{ "--event-color": eventColor } as React.CSSProperties}
                   >
@@ -2461,7 +2601,89 @@ export default function Home() {
               }}
             />
           </div>
+
+          {isMobileLayout && calendarView === "dayGridMonth" && (
+            <section className="mobile-day-agenda" aria-live="polite">
+              <div className="mobile-agenda-heading">
+                <div>
+                  <span>선택한 날짜</span>
+                  <strong>
+                    {new Intl.DateTimeFormat("ko-KR", {
+                      month: "long",
+                      day: "numeric",
+                      weekday: "long",
+                    }).format(new Date(`${mobileSelectedDate}T00:00:00`))}
+                  </strong>
+                </div>
+                <b>{mobileSelectedSchedules.length}건</b>
+              </div>
+
+              <div className="mobile-agenda-list">
+                {mobileSelectedSchedules.length ? (
+                  mobileSelectedSchedules.map((schedule) => (
+                    <button
+                      type="button"
+                      className={`mobile-agenda-event schedule-${schedule.status}`}
+                      key={schedule.id}
+                      style={
+                        {
+                          "--instructor-color": instructorColor(
+                            schedule.instructor,
+                            instructorColors,
+                          ),
+                        } as React.CSSProperties
+                      }
+                      onClick={() => handleScheduleClick(schedule)}
+                    >
+                      <span className="mobile-agenda-time">
+                        {schedule.startTime ||
+                          (schedule.kind === "off" ? "종일" : "미정")}
+                      </span>
+                      <span className="mobile-agenda-copy">
+                        <strong>{schedule.instructor}</strong>
+                        <span>{schedule.topic || KIND_META[schedule.kind].label}</span>
+                        {regionText(schedule) && <small>{regionText(schedule)}</small>}
+                      </span>
+                      <span
+                        className="mobile-agenda-kind"
+                        style={{ background: kindColors[schedule.kind] }}
+                      >
+                        {KIND_META[schedule.kind].label}
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="mobile-agenda-empty">
+                    현재 필터에 맞는 일정이 없습니다.
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
         </div>
+
+        <nav className="mobile-action-bar" aria-label="모바일 빠른 작업">
+          <button
+            type="button"
+            onClick={() => setMobileFiltersOpenWithMotion(true)}
+          >
+            <Filter size={19} />
+            <span>필터</span>
+          </button>
+          <button type="button" onClick={openScheduleForVisibleDate}>
+            <Plus size={20} />
+            <span>등록</span>
+          </button>
+          <button
+            type="button"
+            className={isBulkSelectionMode ? "active" : ""}
+            aria-pressed={isBulkSelectionMode}
+            onClick={toggleBulkSelectionMode}
+          >
+            <ListPlus size={19} />
+            <span>복수 선택</span>
+          </button>
+        </nav>
       </section>
 
       {isEditorOpen && editorSchedule && (

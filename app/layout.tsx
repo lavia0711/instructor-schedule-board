@@ -13,7 +13,23 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ko">
-      <body>{children}</body>
+      <body>
+        <style id="mobile-filter-boot-style">{`
+          @media (max-width: 820px) {
+            .sidebar {
+              position: fixed;
+              left: 0;
+              visibility: hidden;
+              transform: translateX(-105%);
+            }
+
+            .app-shell.mobile-layout-ready .sidebar {
+              visibility: visible;
+            }
+          }
+        `}</style>
+        {children}
+      </body>
     </html>
   );
 }
