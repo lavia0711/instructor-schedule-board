@@ -555,6 +555,7 @@ export default function Home() {
     useState<CalendarView>("dayGridMonth");
   const [calendarTitle, setCalendarTitle] = useState("2026년 7월");
   const [isMobileLayout, setIsMobileLayout] = useState(false);
+  const [isMobileLayoutReady, setIsMobileLayoutReady] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [isMobileFilterMotionEnabled, setIsMobileFilterMotionEnabled] =
     useState(false);
@@ -618,6 +619,7 @@ export default function Home() {
     const mediaQuery = window.matchMedia("(max-width: 820px)");
     const syncLayout = () => {
       setIsMobileLayout(mediaQuery.matches);
+      setIsMobileLayoutReady(true);
       setIsMobileFilterMotionEnabled(false);
       setIsMobileFiltersOpen(false);
     };
@@ -1834,7 +1836,9 @@ export default function Home() {
     <main
       className={`app-shell ${
         isMobileFiltersOpen ? "mobile-filters-open" : ""
-      } ${isMobileFilterMotionEnabled ? "mobile-filter-motion" : ""}`}
+      } ${isMobileFilterMotionEnabled ? "mobile-filter-motion" : ""} ${
+        isMobileLayoutReady ? "mobile-layout-ready" : ""
+      }`}
     >
       {isMobileFiltersOpen && (
         <button
