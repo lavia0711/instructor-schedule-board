@@ -556,6 +556,8 @@ export default function Home() {
   const [calendarTitle, setCalendarTitle] = useState("2026년 7월");
   const [isMobileLayout, setIsMobileLayout] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
+  const [isMobileFilterMotionEnabled, setIsMobileFilterMotionEnabled] =
+    useState(false);
   const [mobileSelectedDate, setMobileSelectedDate] = useState(TODAY);
   const [instructorFilter, setInstructorFilter] = useState("all");
   const [kindFilters, setKindFilters] = useState<ScheduleKind[]>([
@@ -607,11 +609,17 @@ export default function Home() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  const setMobileFiltersOpenWithMotion = useCallback((open: boolean) => {
+    setIsMobileFilterMotionEnabled(true);
+    setIsMobileFiltersOpen(open);
+  }, []);
+
   useEffect(() => {
     const mediaQuery = window.matchMedia("(max-width: 820px)");
     const syncLayout = () => {
       setIsMobileLayout(mediaQuery.matches);
-      if (!mediaQuery.matches) setIsMobileFiltersOpen(false);
+      setIsMobileFilterMotionEnabled(false);
+      setIsMobileFiltersOpen(false);
     };
     syncLayout();
     mediaQuery.addEventListener("change", syncLayout);
@@ -632,7 +640,7 @@ export default function Home() {
     const previousOverflow = document.body.style.overflow;
     const previousRootOverflow = document.documentElement.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setIsMobileFiltersOpen(false);
+      if (event.key === "Escape") setMobileFiltersOpenWithMotion(false);
     };
     document.body.style.overflow = "hidden";
     document.documentElement.style.overflow = "hidden";
@@ -642,7 +650,12 @@ export default function Home() {
       document.documentElement.style.overflow = previousRootOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [isEditorOpen, isImportOpen, isMobileFiltersOpen]);
+  }, [
+    isEditorOpen,
+    isImportOpen,
+    isMobileFiltersOpen,
+    setMobileFiltersOpenWithMotion,
+  ]);
 
   const hydrateRemoteWorkspace = useCallback(async (userId: string) => {
     const [workspace, profile] = await Promise.all([
@@ -1821,14 +1834,14 @@ export default function Home() {
     <main
       className={`app-shell ${
         isMobileFiltersOpen ? "mobile-filters-open" : ""
-      }`}
+      } ${isMobileFilterMotionEnabled ? "mobile-filter-motion" : ""}`}
     >
       {isMobileFiltersOpen && (
         <button
           type="button"
           className="mobile-sidebar-backdrop"
           aria-label="필터 닫기"
-          onClick={() => setIsMobileFiltersOpen(false)}
+          onClick={() => setMobileFiltersOpenWithMotion(false)}
         />
       )}
       <aside
@@ -1849,7 +1862,7 @@ export default function Home() {
             type="button"
             className="mobile-sidebar-close"
             aria-label="필터 닫기"
-            onClick={() => setIsMobileFiltersOpen(false)}
+            onClick={() => setMobileFiltersOpenWithMotion(false)}
           >
             <X size={19} />
           </button>
@@ -2201,7 +2214,7 @@ export default function Home() {
             type="button"
             className="mobile-filter-button"
             aria-label="필터 열기"
-            onClick={() => setIsMobileFiltersOpen(true)}
+            onClick={() => setMobileFiltersOpenWithMotion(true)}
           >
             <Filter size={19} />
           </button>
@@ -2646,7 +2659,10 @@ export default function Home() {
         </div>
 
         <nav className="mobile-action-bar" aria-label="모바일 빠른 작업">
-          <button type="button" onClick={() => setIsMobileFiltersOpen(true)}>
+          <button
+            type="button"
+            onClick={() => setMobileFiltersOpenWithMotion(true)}
+          >
             <Filter size={19} />
             <span>필터</span>
           </button>
