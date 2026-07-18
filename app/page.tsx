@@ -2683,14 +2683,6 @@ export default function Home() {
             <ListPlus size={19} />
             <span>복수 선택</span>
           </button>
-          <button
-            type="button"
-            disabled={!isAdmin}
-            onClick={() => setIsImportOpen(true)}
-          >
-            <FileSpreadsheet size={19} />
-            <span>엑셀</span>
-          </button>
         </nav>
       </section>
 
