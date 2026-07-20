@@ -2540,7 +2540,7 @@ export default function Home() {
                   instructorColors,
                 );
                 const isMonthView = content.view.type === "dayGridMonth";
-                const monthTime =
+                const eventTime =
                   schedule.startTime && schedule.endTime
                     ? `${schedule.startTime}~${schedule.endTime}`
                     : schedule.startTime ||
@@ -2552,7 +2552,7 @@ export default function Home() {
                   : normalizedCourse.includes("클로드")
                     ? "#d97757"
                     : kindColor;
-                const monthPlace =
+                const eventPlace =
                   schedule.kind === "office" || schedule.kind === "off"
                     ? ""
                     : [schedule.region || "지역 미정", schedule.venue]
@@ -2571,14 +2571,14 @@ export default function Home() {
                       }
                     >
                       <span className="month-event-topline">
-                        <span className="month-event-time">{monthTime}</span>
+                        <span className="month-event-time">{eventTime}</span>
                         <span className="month-event-course">{courseLabel}</span>
                       </span>
                       <strong className="month-event-instructor">
                         {schedule.instructor}
                       </strong>
-                      {monthPlace && (
-                        <span className="month-event-place">{monthPlace}</span>
+                      {eventPlace && (
+                        <span className="month-event-place">{eventPlace}</span>
                       )}
                     </div>
                   );
@@ -2586,60 +2586,60 @@ export default function Home() {
 
                 return (
                   <div
-                    className={`calendar-event-content ${
+                    className={`calendar-event-content agenda-event-content ${
                       content.view.type === "listWeek"
                         ? "list-event-content"
                         : "time-event-content"
-                    }`}
-                    style={{ "--event-color": eventColor } as React.CSSProperties}
+                    } ${content.event.allDay ? "all-day-event-content" : ""}`}
+                    style={
+                      {
+                        "--event-color": eventColor,
+                        "--course-color": courseColor,
+                      } as React.CSSProperties
+                    }
                   >
-                    <span
-                      className="event-kind-badge"
-                      style={
-                        {
-                          "--badge-color": kindColor,
-                        } as React.CSSProperties
-                      }
-                    >
-                      {meta.label}
+                    <span className="agenda-event-topline">
+                      <span className="agenda-event-time">{eventTime}</span>
+                      <span className="agenda-event-course">{courseLabel}</span>
                     </span>
-                    {schedule.status !== "confirmed" && (
-                      <span
-                        className="event-kind-badge event-status-badge"
-                        style={
-                          {
-                            "--badge-color": STATUS_META[schedule.status].color,
-                          } as React.CSSProperties
-                        }
-                      >
-                        {STATUS_META[schedule.status].label}
+                    <span className="agenda-event-mainline">
+                      <strong className="agenda-event-instructor">
+                        {schedule.instructor}
+                      </strong>
+                      <span className="agenda-event-flags">
+                        {schedule.status !== "confirmed" && (
+                          <span
+                            className="agenda-event-flag"
+                            style={
+                              {
+                                "--flag-color":
+                                  STATUS_META[schedule.status].color,
+                              } as React.CSSProperties
+                            }
+                          >
+                            {STATUS_META[schedule.status].label}
+                          </span>
+                        )}
+                        {(assistantStatus === "unassigned" ||
+                          assistantStatus === "not_required") && (
+                          <span
+                            className="agenda-event-flag"
+                            style={
+                              {
+                                "--flag-color":
+                                  ASSISTANT_ASSIGNMENT_META[assistantStatus]
+                                    .color,
+                              } as React.CSSProperties
+                            }
+                          >
+                            {ASSISTANT_ASSIGNMENT_META[assistantStatus].label}
+                          </span>
+                        )}
                       </span>
-                    )}
-                    {(assistantStatus === "unassigned" ||
-                      assistantStatus === "not_required") && (
-                      <span
-                        className="event-kind-badge event-assistant-badge"
-                        style={
-                          {
-                            "--badge-color":
-                              ASSISTANT_ASSIGNMENT_META[assistantStatus].color,
-                          } as React.CSSProperties
-                        }
-                      >
-                        {ASSISTANT_ASSIGNMENT_META[assistantStatus].label}
-                      </span>
-                    )}
-                    <b>{schedule.instructor}</b>
-                    <span className="event-topic">
-                      {schedule.topic || meta.label}
                     </span>
-                    {regionText(schedule) && (
-                      <span className="event-region">{regionText(schedule)}</span>
+                    {eventPlace && (
+                      <span className="agenda-event-place">{eventPlace}</span>
                     )}
-                    <span className="event-time">
-                      {schedule.startTime ||
-                        (schedule.kind === "off" ? "종일" : "시간 미정")}
-                    </span>
                   </div>
                 );
               }}
