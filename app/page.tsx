@@ -2455,6 +2455,7 @@ export default function Home() {
               firstDay={0}
               height={isMobileLayout ? "auto" : "100%"}
               expandRows={!isMobileLayout}
+              showNonCurrentDates={false}
               nowIndicator
               navLinks={false}
               selectable
@@ -2538,14 +2539,57 @@ export default function Home() {
                   schedule.instructor,
                   instructorColors,
                 );
+                const isMonthView = content.view.type === "dayGridMonth";
+                const monthTime =
+                  schedule.startTime && schedule.endTime
+                    ? `${schedule.startTime}~${schedule.endTime}`
+                    : schedule.startTime ||
+                      (schedule.kind === "off" ? "종일" : "시간 미정");
+                const courseLabel = schedule.topic || meta.label;
+                const normalizedCourse = courseLabel.toLocaleLowerCase("ko-KR");
+                const courseColor = normalizedCourse.includes("제미나이")
+                  ? "#4285f4"
+                  : normalizedCourse.includes("클로드")
+                    ? "#d97757"
+                    : kindColor;
+                const monthPlace =
+                  schedule.kind === "office" || schedule.kind === "off"
+                    ? ""
+                    : [schedule.region || "지역 미정", schedule.venue]
+                        .filter(Boolean)
+                        .join(" · ");
+
+                if (isMonthView) {
+                  return (
+                    <div
+                      className="calendar-event-content month-event-content"
+                      style={
+                        {
+                          "--event-color": eventColor,
+                          "--course-color": courseColor,
+                        } as React.CSSProperties
+                      }
+                    >
+                      <span className="month-event-topline">
+                        <span className="month-event-time">{monthTime}</span>
+                        <span className="month-event-course">{courseLabel}</span>
+                      </span>
+                      <strong className="month-event-instructor">
+                        {schedule.instructor}
+                      </strong>
+                      {monthPlace && (
+                        <span className="month-event-place">{monthPlace}</span>
+                      )}
+                    </div>
+                  );
+                }
+
                 return (
                   <div
                     className={`calendar-event-content ${
-                      content.view.type === "dayGridMonth"
-                        ? "month-event-content"
-                        : content.view.type === "listWeek"
-                          ? "list-event-content"
-                          : "time-event-content"
+                      content.view.type === "listWeek"
+                        ? "list-event-content"
+                        : "time-event-content"
                     }`}
                     style={{ "--event-color": eventColor } as React.CSSProperties}
                   >
