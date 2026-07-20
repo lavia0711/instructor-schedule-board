@@ -5,6 +5,48 @@ export type AssistantAssignmentStatus =
   | "assigned"
   | "not_required";
 
+export function assignedAssistantNames(
+  schedule: Schedule,
+  allSchedules: Schedule[],
+): string[] {
+  if (schedule.kind !== "lecture" || schedule.status === "cancelled") {
+    return [];
+  }
+
+  const names = new Set<string>();
+  allSchedules.forEach((item) => {
+    if (
+      item.kind !== "assistant" ||
+      item.parentScheduleId !== schedule.id ||
+      item.status === "cancelled"
+    ) {
+      return;
+    }
+
+    const name = item.instructor.trim();
+    if (name) names.add(name);
+  });
+
+  return [...names];
+}
+
+export function groupLinkedAssistantSchedules(
+  visibleSchedules: Schedule[],
+): Schedule[] {
+  const visibleLectureIds = new Set(
+    visibleSchedules
+      .filter((schedule) => schedule.kind === "lecture")
+      .map((schedule) => schedule.id),
+  );
+
+  return visibleSchedules.filter(
+    (schedule) =>
+      schedule.kind !== "assistant" ||
+      !schedule.parentScheduleId ||
+      !visibleLectureIds.has(schedule.parentScheduleId),
+  );
+}
+
 export function normalizeAssistantRequirement(schedule: Schedule): Schedule {
   return {
     ...schedule,
@@ -22,12 +64,7 @@ export function assistantAssignmentStatus(
   }
   if (!schedule.assistantRequired) return "not_required";
 
-  return allSchedules.some(
-    (item) =>
-      item.kind === "assistant" &&
-      item.parentScheduleId === schedule.id &&
-      item.status !== "cancelled",
-  )
+  return assignedAssistantNames(schedule, allSchedules).length > 0
     ? "assigned"
     : "unassigned";
 }

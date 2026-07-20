@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assignedAssistantNames,
   assistantAssignmentStatus,
+  groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
   preserveImportedAssistantRequirement,
 } from "../lib/assistant-assignment.ts";
@@ -67,6 +69,61 @@ test("not-required and cancelled lectures are handled separately", () => {
     assistantAssignmentStatus(schedule({ status: "cancelled" }), []),
     null,
   );
+});
+
+test("assigned assistant names include unique active linked instructors", () => {
+  const main = schedule();
+  const first = schedule({
+    id: "assistant-1",
+    instructor: "Assistant Kim",
+    kind: "assistant",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+  const duplicate = schedule({
+    id: "assistant-2",
+    instructor: " Assistant Kim ",
+    kind: "assistant",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+  const cancelled = schedule({
+    id: "assistant-3",
+    instructor: "Assistant Park",
+    kind: "assistant",
+    status: "cancelled",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+
+  assert.deepEqual(
+    assignedAssistantNames(main, [main, first, duplicate, cancelled]),
+    ["Assistant Kim"],
+  );
+});
+
+test("linked assistant cards collapse only while their lecture is visible", () => {
+  const main = schedule();
+  const linked = schedule({
+    id: "assistant-linked",
+    kind: "assistant",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+  const unlinked = schedule({
+    id: "assistant-unlinked",
+    kind: "assistant",
+    parentScheduleId: undefined,
+    assistantRequired: false,
+  });
+
+  assert.deepEqual(
+    groupLinkedAssistantSchedules([main, linked, unlinked]).map(
+      (item) => item.id,
+    ),
+    [main.id, unlinked.id],
+  );
+  assert.deepEqual(groupLinkedAssistantSchedules([linked]), [linked]);
 });
 
 test("Excel updates preserve a user's not-required decision", () => {

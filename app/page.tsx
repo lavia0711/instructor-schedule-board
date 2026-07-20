@@ -75,7 +75,9 @@ import {
   type CalendarView,
 } from "@/lib/calendar-responsive";
 import {
+  assignedAssistantNames,
   assistantAssignmentStatus,
+  groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
   preserveImportedAssistantRequirement,
   type AssistantAssignmentStatus,
@@ -146,6 +148,16 @@ const ASSISTANT_ASSIGNMENT_META: Record<
 const ASSISTANT_ASSIGNMENT_STATUSES = Object.keys(
   ASSISTANT_ASSIGNMENT_META,
 ) as AssistantAssignmentStatus[];
+
+function assistantSummaryValue(
+  status: AssistantAssignmentStatus | null,
+  names: string[],
+) {
+  if (status === "assigned") return names.join(" · ");
+  if (status === "unassigned") return "미배정";
+  if (status === "not_required") return "불필요";
+  return "";
+}
 
 const DEFAULT_KIND_COLORS: Record<ScheduleKind, string> = {
   lecture: KIND_META.lecture.color,
@@ -1047,12 +1059,18 @@ export default function Home() {
     statusFilters,
   ]);
 
+  const groupedCalendarSchedules = useMemo(
+    () => groupLinkedAssistantSchedules(filteredSchedules),
+    [filteredSchedules],
+  );
+
   const calendarEvents = useMemo<EventInput[]>(
     () =>
-      filteredSchedules.map((schedule) => {
+      groupedCalendarSchedules.map((schedule) => {
         const meta = KIND_META[schedule.kind];
         const isAllDay = !schedule.startTime || !schedule.endTime;
         const assistantStatus = assistantAssignmentStatus(schedule, schedules);
+        const assistantNames = assignedAssistantNames(schedule, schedules);
         return {
           id: schedule.id,
           title: [
@@ -1085,13 +1103,14 @@ export default function Home() {
             schedule,
             kindColor: kindColors[schedule.kind],
             assistantStatus,
+            assistantNames,
           },
         };
       }),
     [
       activeInstructor,
       bulkSelectedScheduleIds,
-      filteredSchedules,
+      groupedCalendarSchedules,
       instructorColors,
       instructors,
       isAdmin,
@@ -1123,7 +1142,7 @@ export default function Home() {
 
   const mobileSelectedSchedules = useMemo(
     () =>
-      filteredSchedules
+      groupedCalendarSchedules
         .filter((schedule) => schedule.date === mobileSelectedDate)
         .sort((a, b) => {
           const timeOrder = (a.startTime || "99:99").localeCompare(
@@ -1132,7 +1151,7 @@ export default function Home() {
           if (timeOrder !== 0) return timeOrder;
           return instructors.indexOf(a.instructor) - instructors.indexOf(b.instructor);
         }),
-    [filteredSchedules, instructors, mobileSelectedDate],
+    [groupedCalendarSchedules, instructors, mobileSelectedDate],
   );
 
   function changeView(view: CalendarView) {
@@ -2534,6 +2553,8 @@ export default function Home() {
                 const kindColor = content.event.extendedProps.kindColor as string;
                 const assistantStatus = content.event.extendedProps
                   .assistantStatus as AssistantAssignmentStatus | null;
+                const assistantNames = (content.event.extendedProps
+                  .assistantNames || []) as string[];
                 const meta = KIND_META[schedule.kind];
                 const eventColor = instructorColor(
                   schedule.instructor,
@@ -2558,11 +2579,20 @@ export default function Home() {
                     : [schedule.region || "지역 미정", schedule.venue]
                         .filter(Boolean)
                         .join(" · ");
+                const assistantSummary = assistantSummaryValue(
+                  assistantStatus,
+                  assistantNames,
+                );
+                const assistantSummaryColor = assistantStatus
+                  ? ASSISTANT_ASSIGNMENT_META[assistantStatus].color
+                  : undefined;
 
                 if (isMonthView) {
                   return (
                     <div
-                      className="calendar-event-content month-event-content"
+                      className={`calendar-event-content month-event-content ${
+                        assistantSummary ? "has-assistant-summary" : ""
+                      }`}
                       style={
                         {
                           "--event-color": eventColor,
@@ -2580,6 +2610,19 @@ export default function Home() {
                       {eventPlace && (
                         <span className="month-event-place">{eventPlace}</span>
                       )}
+                      {assistantSummary && (
+                        <span
+                          className="event-assistant-summary month-event-assistant"
+                          style={
+                            {
+                              "--assistant-color": assistantSummaryColor,
+                            } as React.CSSProperties
+                          }
+                        >
+                          <span className="event-assistant-label">보조강사:</span>
+                          <strong>{assistantSummary}</strong>
+                        </span>
+                      )}
                     </div>
                   );
                 }
@@ -2590,7 +2633,9 @@ export default function Home() {
                       content.view.type === "listWeek"
                         ? "list-event-content"
                         : "time-event-content"
-                    } ${content.event.allDay ? "all-day-event-content" : ""}`}
+                    } ${content.event.allDay ? "all-day-event-content" : ""} ${
+                      assistantSummary ? "has-assistant-summary" : ""
+                    }`}
                     style={
                       {
                         "--event-color": eventColor,
@@ -2620,25 +2665,23 @@ export default function Home() {
                             {STATUS_META[schedule.status].label}
                           </span>
                         )}
-                        {(assistantStatus === "unassigned" ||
-                          assistantStatus === "not_required") && (
-                          <span
-                            className="agenda-event-flag"
-                            style={
-                              {
-                                "--flag-color":
-                                  ASSISTANT_ASSIGNMENT_META[assistantStatus]
-                                    .color,
-                              } as React.CSSProperties
-                            }
-                          >
-                            {ASSISTANT_ASSIGNMENT_META[assistantStatus].label}
-                          </span>
-                        )}
                       </span>
                     </span>
                     {eventPlace && (
                       <span className="agenda-event-place">{eventPlace}</span>
+                    )}
+                    {assistantSummary && (
+                      <span
+                        className="event-assistant-summary agenda-event-assistant"
+                        style={
+                          {
+                            "--assistant-color": assistantSummaryColor,
+                          } as React.CSSProperties
+                        }
+                      >
+                        <span className="event-assistant-label">보조강사:</span>
+                        <strong>{assistantSummary}</strong>
+                      </span>
                     )}
                   </div>
                 );
@@ -2664,38 +2707,65 @@ export default function Home() {
 
               <div className="mobile-agenda-list">
                 {mobileSelectedSchedules.length ? (
-                  mobileSelectedSchedules.map((schedule) => (
-                    <button
-                      type="button"
-                      className={`mobile-agenda-event schedule-${schedule.status}`}
-                      key={schedule.id}
-                      style={
-                        {
-                          "--instructor-color": instructorColor(
-                            schedule.instructor,
-                            instructorColors,
-                          ),
-                        } as React.CSSProperties
-                      }
-                      onClick={() => handleScheduleClick(schedule)}
-                    >
-                      <span className="mobile-agenda-time">
-                        {schedule.startTime ||
-                          (schedule.kind === "off" ? "종일" : "미정")}
-                      </span>
-                      <span className="mobile-agenda-copy">
-                        <strong>{schedule.instructor}</strong>
-                        <span>{schedule.topic || KIND_META[schedule.kind].label}</span>
-                        {regionText(schedule) && <small>{regionText(schedule)}</small>}
-                      </span>
-                      <span
-                        className="mobile-agenda-kind"
-                        style={{ background: kindColors[schedule.kind] }}
+                  mobileSelectedSchedules.map((schedule) => {
+                    const assistantStatus = assistantAssignmentStatus(
+                      schedule,
+                      schedules,
+                    );
+                    const assistantSummary = assistantSummaryValue(
+                      assistantStatus,
+                      assignedAssistantNames(schedule, schedules),
+                    );
+
+                    return (
+                      <button
+                        type="button"
+                        className={`mobile-agenda-event schedule-${schedule.status}`}
+                        key={schedule.id}
+                        style={
+                          {
+                            "--instructor-color": instructorColor(
+                              schedule.instructor,
+                              instructorColors,
+                            ),
+                          } as React.CSSProperties
+                        }
+                        onClick={() => handleScheduleClick(schedule)}
                       >
-                        {KIND_META[schedule.kind].label}
-                      </span>
-                    </button>
-                  ))
+                        <span className="mobile-agenda-time">
+                          {schedule.startTime ||
+                            (schedule.kind === "off" ? "종일" : "미정")}
+                        </span>
+                        <span className="mobile-agenda-copy">
+                          <strong>{schedule.instructor}</strong>
+                          <span>
+                            {schedule.topic || KIND_META[schedule.kind].label}
+                          </span>
+                          {regionText(schedule) && (
+                            <small>{regionText(schedule)}</small>
+                          )}
+                          {assistantSummary && assistantStatus && (
+                            <small
+                              className="mobile-agenda-assistant"
+                              style={{
+                                color:
+                                  ASSISTANT_ASSIGNMENT_META[assistantStatus]
+                                    .color,
+                              }}
+                            >
+                              보조강사: <b>{assistantSummary}</b>
+                            </small>
+                          )}
+                        </span>
+                        <span
+                          className="mobile-agenda-kind"
+                          style={{ background: kindColors[schedule.kind] }}
+                        >
+                          {KIND_META[schedule.kind].label}
+                        </span>
+                      </button>
+                    );
+                  })
                 ) : (
                   <p className="mobile-agenda-empty">
                     현재 필터에 맞는 일정이 없습니다.
