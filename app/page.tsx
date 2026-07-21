@@ -72,6 +72,7 @@ import { cascadeCancelledLectureAssistants } from "@/lib/schedule-cancellation";
 import {
   calendarDisplayView,
   logicalCalendarView,
+  registrationDate,
   type CalendarView,
 } from "@/lib/calendar-responsive";
 import {
@@ -79,8 +80,11 @@ import {
   assistantAssignmentStatus,
   groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
+  parentLectureAvailability,
   preserveImportedAssistantRequirement,
+  preserveImportedLectureClassification,
   type AssistantAssignmentStatus,
+  type ParentLectureAvailability,
 } from "@/lib/assistant-assignment";
 import {
   getSupabaseClient,
@@ -270,6 +274,30 @@ function parentLectureLabel(schedule: Schedule) {
     .join(" · ");
 }
 
+function parentLectureAvailabilityMessage(
+  availability: ParentLectureAvailability,
+) {
+  if (availability === "cancelled_only") {
+    return "취소된 본강의만 있어 연결할 수 없습니다.";
+  }
+  if (availability === "non_lecture_only") {
+    return "같은 날짜에 기타 일정만 있습니다. 연결하려는 일정이라면 종류를 본강의로 변경해주세요.";
+  }
+  return "이 날짜에는 등록된 본강의가 없습니다.";
+}
+
+function parentLectureAvailabilityOptionLabel(
+  availability: ParentLectureAvailability,
+) {
+  if (availability === "cancelled_only") {
+    return "취소된 본강의만 있습니다";
+  }
+  if (availability === "non_lecture_only") {
+    return "기타로 분류된 일정만 있습니다";
+  }
+  return "이 날짜에는 본강의가 없습니다";
+}
+
 function scheduleIdentityKey(schedule: Schedule) {
   const untimedSession =
     schedule.startTime || schedule.endTime
@@ -290,6 +318,7 @@ function scheduleSlotKey(schedule: Schedule) {
   return [
     schedule.date,
     schedule.instructor.trim(),
+    schedule.kind,
     schedule.session || deriveSession(schedule.startTime),
   ]
     .join("|")
@@ -346,7 +375,7 @@ function classifyImportCandidate(
 
   const exactIdentityMatch = identityMatches[0];
   if (exactIdentityMatch) {
-    const nextSchedule = preserveImportedAssistantRequirement(
+    const nextSchedule = preserveImportedLectureClassification(
       schedule,
       exactIdentityMatch,
     );
@@ -393,7 +422,7 @@ function classifyImportCandidate(
     };
   }
   if (slotMatches.length === 1) {
-    const nextSchedule = preserveImportedAssistantRequirement(
+    const nextSchedule = preserveImportedLectureClassification(
       schedule,
       slotMatches[0],
     );
@@ -1200,13 +1229,13 @@ export default function Home() {
 
   function openScheduleForVisibleDate() {
     const calendarDate = calendarRef.current?.getApi().getDate();
-    openNewSchedule(
-      calendarView === "dayGridMonth"
-        ? mobileSelectedDate
-        : calendarDate
-          ? isoFromLocalDate(calendarDate)
-          : TODAY,
-    );
+    openNewSchedule(registrationDate({
+      view: calendarView,
+      mobile: isMobileLayout,
+      mobileSelectedDate,
+      calendarDate: calendarDate ? isoFromLocalDate(calendarDate) : undefined,
+      today: TODAY,
+    }));
   }
 
   function toggleBulkDate(date: string) {
@@ -1891,7 +1920,7 @@ export default function Home() {
           </button>
         </div>
 
-        <button className="primary-action" onClick={() => openNewSchedule()}>
+        <button className="primary-action" onClick={openScheduleForVisibleDate}>
           <Plus size={18} />
           일정 등록
         </button>
@@ -2806,6 +2835,7 @@ export default function Home() {
           schedule={editorSchedule}
           instructors={instructors}
           mainLectures={mainLectures}
+          allSchedules={schedules}
           bulkDates={bulkEditorDates || undefined}
           kindColors={kindColors}
           isAdmin={isAdmin}
@@ -3188,6 +3218,7 @@ function ScheduleEditor({
   schedule,
   instructors,
   mainLectures,
+  allSchedules,
   bulkDates,
   kindColors,
   isAdmin,
@@ -3202,6 +3233,7 @@ function ScheduleEditor({
   schedule: Schedule;
   instructors: string[];
   mainLectures: Schedule[];
+  allSchedules: Schedule[];
   bulkDates?: string[];
   kindColors: Record<ScheduleKind, string>;
   isAdmin: boolean;
@@ -3246,6 +3278,16 @@ function ScheduleEditor({
   );
   const selectedMainLecture = availableMainLectures.find(
     (lecture) => lecture.id === form.parentScheduleId,
+  );
+  const currentParentAvailability = parentLectureAvailability(
+    form.date,
+    allSchedules,
+    schedule.id,
+  );
+  const hasSelectableMainLectures = availableMainLectures.some(
+    (lecture) =>
+      lecture.status !== "cancelled" ||
+      lecture.id === form.parentScheduleId,
   );
   const hasAllBulkParentLectures = Boolean(
     bulkDates?.every((date) => {
@@ -3540,6 +3582,11 @@ function ScheduleEditor({
                       (lecture) =>
                         lecture.date === date && lecture.status !== "cancelled",
                     );
+                    const availability = parentLectureAvailability(
+                      date,
+                      allSchedules,
+                      schedule.id,
+                    );
                     return (
                       <label className="bulk-parent-lecture-row" key={date}>
                         <span>{date}</span>
@@ -3556,7 +3603,9 @@ function ScheduleEditor({
                           <option value="">
                             {candidates.length > 0
                               ? "본강의를 선택하세요"
-                              : "해당 날짜에 본강의가 없습니다"}
+                              : parentLectureAvailabilityOptionLabel(
+                                  availability,
+                                )}
                           </option>
                           {candidates.map((lecture) => (
                             <option key={lecture.id} value={lecture.id}>
@@ -3573,13 +3622,15 @@ function ScheduleEditor({
                   <span>본강의 선택</span>
                   <select
                     value={selectedMainLecture?.id || ""}
-                    disabled={!editable || availableMainLectures.length === 0}
+                    disabled={!editable || !hasSelectableMainLectures}
                     onChange={(event) => chooseParentLecture(event.target.value)}
                   >
                     <option value="">
-                      {availableMainLectures.length > 0
+                      {hasSelectableMainLectures
                         ? "본강의를 선택하세요"
-                        : "이 날짜에는 등록된 본강의가 없습니다"}
+                        : parentLectureAvailabilityOptionLabel(
+                            currentParentAvailability,
+                          )}
                     </option>
                     {availableMainLectures.map((lecture) => (
                       <option
@@ -3596,6 +3647,16 @@ function ScheduleEditor({
                   </select>
                 </label>
               )}
+              {!isBulk &&
+                !selectedMainLecture &&
+                currentParentAvailability !== "available" &&
+                currentParentAvailability !== "empty" && (
+                  <small className="parent-lecture-warning">
+                    {parentLectureAvailabilityMessage(
+                      currentParentAvailability,
+                    )}
+                  </small>
+                )}
               <small>
                 {isBulk
                   ? "후보가 하나뿐인 날짜는 자동 선택됩니다. 각 본강의의 시간, 지역, 장소, 강의명과 상태가 적용됩니다."
@@ -3862,12 +3923,7 @@ function ScheduleEditor({
           {editable && (
             <button
               className="primary-button"
-              disabled={
-                !form.date ||
-                !form.instructor ||
-                hasPartialTime ||
-                hasInvalidTime
-              }
+              disabled={!canSubmit}
               onClick={submit}
             >
               <Check size={17} />

@@ -6,7 +6,9 @@ import {
   assistantAssignmentStatus,
   groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
+  parentLectureAvailability,
   preserveImportedAssistantRequirement,
+  preserveImportedLectureClassification,
 } from "../lib/assistant-assignment.ts";
 
 function schedule(overrides = {}) {
@@ -143,6 +145,54 @@ test("Excel updates preserve a user's not-required decision", () => {
     preserveImportedAssistantRequirement(imported).assistantRequired,
     true,
   );
+});
+
+test("Excel updates do not downgrade an existing lecture to other", () => {
+  const previous = schedule({ assistantRequired: false });
+  const imported = schedule({
+    kind: "other",
+    assistantRequired: false,
+    source: "excel",
+  });
+
+  const merged = preserveImportedLectureClassification(imported, previous);
+  assert.equal(merged.kind, "lecture");
+  assert.equal(merged.assistantRequired, false);
+  assert.equal(
+    preserveImportedLectureClassification(imported).kind,
+    "other",
+  );
+});
+
+test("parent lecture availability explains excluded same-date schedules", () => {
+  const main = schedule();
+  assert.equal(
+    parentLectureAvailability(main.date, [main]),
+    "available",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [
+      schedule({ status: "cancelled" }),
+    ]),
+    "cancelled_only",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [schedule({ kind: "other" })]),
+    "non_lecture_only",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [
+      schedule({ status: "cancelled" }),
+      schedule({ id: "other-1", kind: "other" }),
+      schedule({ id: "active-1", status: "pending" }),
+    ]),
+    "available",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [main], main.id),
+    "empty",
+  );
+  assert.equal(parentLectureAvailability(main.date, []), "empty");
 });
 
 test("old local lectures default to required and non-lectures cannot require", () => {

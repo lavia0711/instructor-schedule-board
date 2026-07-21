@@ -5,6 +5,12 @@ export type AssistantAssignmentStatus =
   | "assigned"
   | "not_required";
 
+export type ParentLectureAvailability =
+  | "available"
+  | "cancelled_only"
+  | "non_lecture_only"
+  | "empty";
+
 export function assignedAssistantNames(
   schedule: Schedule,
   allSchedules: Schedule[],
@@ -82,4 +88,40 @@ export function preserveImportedAssistantRequirement(
     assistantRequired:
       previous?.kind === "lecture" ? previous.assistantRequired : true,
   };
+}
+
+export function preserveImportedLectureClassification(
+  schedule: Schedule,
+  previous?: Schedule,
+): Schedule {
+  if (previous?.kind === "lecture" && schedule.kind === "other") {
+    return preserveImportedAssistantRequirement(
+      { ...schedule, kind: "lecture" },
+      previous,
+    );
+  }
+  return preserveImportedAssistantRequirement(schedule, previous);
+}
+
+export function parentLectureAvailability(
+  date: string,
+  schedules: Schedule[],
+  excludedScheduleId = "",
+): ParentLectureAvailability {
+  const sameDateSchedules = schedules.filter(
+    (schedule) =>
+      schedule.id !== excludedScheduleId && schedule.date === date,
+  );
+  const lectures = sameDateSchedules.filter(
+    (schedule) => schedule.kind === "lecture",
+  );
+
+  if (lectures.some((lecture) => lecture.status !== "cancelled")) {
+    return "available";
+  }
+  if (lectures.length > 0) return "cancelled_only";
+  if (sameDateSchedules.some((schedule) => schedule.kind === "other")) {
+    return "non_lecture_only";
+  }
+  return "empty";
 }

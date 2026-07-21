@@ -2075,6 +2075,15 @@ button {
   line-height: 1.5;
 }
 
+.parent-lecture-panel > .parent-lecture-warning {
+  margin: 0;
+  padding: 9px 10px;
+  color: #9a3412;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
 .parent-lecture-panel > .field-error {
   margin-top: 0;
   color: var(--danger);
