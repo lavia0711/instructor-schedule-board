@@ -252,6 +252,10 @@ button {
   border-radius: 10px;
 }
 
+.instructor-color-row.can-delete {
+  grid-template-columns: 30px 10px minmax(0, 1fr) 36px 32px;
+}
+
 .instructor-color-row.is-dragging {
   z-index: 5;
   background: #f2f5ff;
@@ -330,6 +334,24 @@ button {
   border-radius: 5px;
 }
 
+.instructor-delete-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  color: #7b8494;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.instructor-delete-button:hover {
+  color: #c2414f;
+  background: #fff0f2;
+}
+
 .color-setting-help {
   display: block;
   margin-top: 7px;
@@ -357,6 +379,10 @@ button {
 }
 
 .kind-filter-row {
+  display: block;
+}
+
+.kind-filter-row.has-color-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 36px;
   align-items: center;
@@ -1959,6 +1985,11 @@ button {
   opacity: 0.65;
 }
 
+.assistant-add-button {
+  width: 100%;
+  min-height: 42px;
+}
+
 .parent-lecture-panel {
   display: grid;
   gap: 11px;
@@ -2444,6 +2475,30 @@ button {
   background: #fff;
   border: 1px solid #dbe2ef;
   border-radius: 999px;
+}
+
+.import-keyword-chips b {
+  letter-spacing: 0;
+}
+
+.import-keyword-chips input[type="color"] {
+  width: 26px;
+  height: 26px;
+  padding: 2px;
+  background: #fff;
+  border: 1px solid #d6dce6;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.import-keyword-chips input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 1px;
+}
+
+.import-keyword-chips input[type="color"]::-webkit-color-swatch,
+.import-keyword-chips input[type="color"]::-moz-color-swatch {
+  border: 0;
+  border-radius: 4px;
 }
 
 .import-keyword-chips button {
@@ -3147,6 +3202,7 @@ button {
   .mobile-agenda-event.schedule-cancelled .mobile-agenda-copy {
     text-decoration: line-through;
     opacity: 0.72;
+    box-shadow: inset 3px 0 #9aa3b2;
   }
 
   .mobile-agenda-time {

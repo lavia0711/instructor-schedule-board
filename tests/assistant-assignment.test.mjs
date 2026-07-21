@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assignedAssistantNames,
+  assistantDraftFromLecture,
   assistantAssignmentStatus,
   groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
@@ -10,6 +11,31 @@ import {
   preserveImportedAssistantRequirement,
   preserveImportedLectureClassification,
 } from "../lib/assistant-assignment.ts";
+
+test("adding an assistant from a lecture keeps the lecture as its parent", () => {
+  const lecture = schedule({
+    id: "lecture-july-7",
+    date: "2026-07-07",
+    instructor: "본 강사",
+    topic: "제미나이 실무",
+    region: "서울",
+    venue: "교육장",
+  });
+
+  const draft = assistantDraftFromLecture(
+    lecture,
+    "보조 강사",
+    "2026-07-21T00:00:00.000Z",
+  );
+
+  assert.equal(draft.id, "");
+  assert.equal(draft.kind, "assistant");
+  assert.equal(draft.parentScheduleId, lecture.id);
+  assert.equal(draft.date, "2026-07-07");
+  assert.equal(draft.instructor, "보조 강사");
+  assert.equal(draft.topic, lecture.topic);
+  assert.equal(lecture.kind, "lecture");
+});
 
 function schedule(overrides = {}) {
   return {

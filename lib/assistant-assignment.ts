@@ -36,6 +36,32 @@ export function assignedAssistantNames(
   return [...names];
 }
 
+export function assistantDraftFromLecture(
+  lecture: Schedule,
+  instructor: string,
+  modifiedAt = new Date().toISOString(),
+): Schedule {
+  return {
+    id: "",
+    date: lecture.date,
+    startTime: lecture.startTime,
+    endTime: lecture.endTime,
+    instructor,
+    region: lecture.region,
+    venue: lecture.venue,
+    session: lecture.session,
+    topic: lecture.topic,
+    kind: "assistant",
+    status: lecture.status,
+    note: undefined,
+    parentScheduleId: lecture.id,
+    assistantRequired: false,
+    arrivalMinutes: 30,
+    source: "manual",
+    modifiedAt,
+  };
+}
+
 export function groupLinkedAssistantSchedules(
   visibleSchedules: Schedule[],
 ): Schedule[] {

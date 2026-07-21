@@ -44,6 +44,7 @@ type ProfileRow = {
 type SettingsRow = {
   kind_colors: WorkspaceSettings["kindColors"];
   lecture_keywords: string[];
+  lecture_keyword_colors: Record<string, string>;
 };
 
 function requireClient() {
@@ -111,7 +112,7 @@ export async function loadRemoteWorkspace() {
       .order("name"),
     client
       .from("workspace_settings")
-      .select("kind_colors,lecture_keywords")
+      .select("kind_colors,lecture_keywords,lecture_keyword_colors")
       .eq("id", "default")
       .single(),
   ]);
@@ -131,6 +132,7 @@ export async function loadRemoteWorkspace() {
     settings: {
       kindColors: settings.kind_colors || {},
       lectureKeywords: settings.lecture_keywords || [],
+      lectureKeywordColors: settings.lecture_keyword_colors || {},
     } satisfies WorkspaceSettings,
   };
 }
@@ -173,6 +175,15 @@ export async function deleteRemoteSchedule(scheduleId: string) {
   if (error) throw error;
 }
 
+export async function deleteRemoteInstructor(instructor: string) {
+  const client = requireClient();
+  const { error } = await client
+    .from("instructors")
+    .delete()
+    .eq("name", instructor.trim());
+  if (error) throw error;
+}
+
 export async function saveRemoteInstructors(instructors: InstructorRecord[]) {
   if (instructors.length === 0) return;
   const client = requireClient();
@@ -196,6 +207,7 @@ export async function saveRemoteWorkspaceSettings(
     .update({
       kind_colors: settings.kindColors,
       lecture_keywords: settings.lectureKeywords,
+      lecture_keyword_colors: settings.lectureKeywordColors,
     })
     .eq("id", "default");
   if (error) throw error;
