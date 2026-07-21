@@ -5,6 +5,14 @@ export type CalendarView =
 
 export type CalendarDisplayView = CalendarView | "listWeek";
 
+type RegistrationDateOptions = {
+  view: CalendarView;
+  mobile: boolean;
+  mobileSelectedDate: string;
+  calendarDate?: string;
+  today: string;
+};
+
 export function calendarDisplayView(
   view: CalendarView,
   mobile: boolean,
@@ -24,4 +32,22 @@ export function logicalCalendarView(
     return view;
   }
   return null;
+}
+
+export function registrationDate({
+  view,
+  mobile,
+  mobileSelectedDate,
+  calendarDate,
+  today,
+}: RegistrationDateOptions): string {
+  if (
+    mobile &&
+    view === "dayGridMonth" &&
+    (!calendarDate ||
+      mobileSelectedDate.slice(0, 7) === calendarDate.slice(0, 7))
+  ) {
+    return mobileSelectedDate;
+  }
+  return calendarDate || today;
 }

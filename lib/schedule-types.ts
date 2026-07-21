@@ -44,4 +44,5 @@ export type UserProfile = {
 export type WorkspaceSettings = {
   kindColors: Partial<Record<ScheduleKind, string>>;
   lectureKeywords: string[];
+  lectureKeywordColors: Record<string, string>;
 };

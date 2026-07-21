@@ -48,6 +48,7 @@ import {
   Plus,
   Search,
   ShieldCheck,
+  Trash2,
   Upload,
   UserRound,
   UsersRound,
@@ -70,21 +71,45 @@ import type {
 import { formatAuthError } from "@/lib/auth-error";
 import { cascadeCancelledLectureAssistants } from "@/lib/schedule-cancellation";
 import {
+  instructorDeletionImpact,
+  removeInstructorSchedules,
+  removeScheduleWithLinkedAssistants,
+} from "@/lib/instructor-management";
+import {
+  classifyImportedScheduleKind,
+  promoteImportedLectureClassifications,
+} from "@/lib/lecture-classification";
+import {
+  distributeInstructorColors,
+  ensureLectureKeywordColors,
+  instructorColor,
+  lectureClassificationColor,
+  lectureKeywordColorKey,
+} from "@/lib/schedule-colors";
+import {
   calendarDisplayView,
   logicalCalendarView,
+  registrationDate,
   type CalendarView,
 } from "@/lib/calendar-responsive";
 import {
+  assignedAssistantNames,
+  assistantDraftFromLecture,
   assistantAssignmentStatus,
+  groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
+  parentLectureAvailability,
   preserveImportedAssistantRequirement,
+  preserveImportedLectureClassification,
   type AssistantAssignmentStatus,
+  type ParentLectureAvailability,
 } from "@/lib/assistant-assignment";
 import {
   getSupabaseClient,
   isSupabaseConfigured,
 } from "@/lib/supabase/client";
 import {
+  deleteRemoteInstructor,
   deleteRemoteSchedule,
   loadCurrentProfile,
   loadRemoteWorkspace,
@@ -113,6 +138,8 @@ const COLOR_STORAGE_KEY = "lecture-schedule-instructor-colors-v1";
 const KIND_COLOR_STORAGE_KEY = "lecture-schedule-kind-colors-v1";
 const INSTRUCTOR_ORDER_STORAGE_KEY = "lecture-schedule-instructor-order-v1";
 const LECTURE_KEYWORDS_STORAGE_KEY = "lecture-schedule-import-keywords-v1";
+const LECTURE_KEYWORD_COLORS_STORAGE_KEY =
+  "lecture-schedule-import-keyword-colors-v1";
 const TODAY = isoFromLocalDate(new Date());
 const CORE_INSTRUCTORS: readonly string[] = [];
 const DEFAULT_LECTURE_KEYWORDS = ["제미나이", "클로드"];
@@ -131,7 +158,7 @@ const KIND_META: Record<
 const STATUS_META: Record<ScheduleStatus, { label: string; color: string }> = {
   confirmed: { label: "확정", color: "#1f9d73" },
   pending: { label: "확인 필요", color: "#e58b22" },
-  cancelled: { label: "취소", color: "#df4b56" },
+  cancelled: { label: "취소", color: "#7b8494" },
 };
 
 const ASSISTANT_ASSIGNMENT_META: Record<
@@ -143,9 +170,20 @@ const ASSISTANT_ASSIGNMENT_META: Record<
   not_required: { label: "보조 불필요", color: "#64748b" },
 };
 
-const ASSISTANT_ASSIGNMENT_STATUSES = Object.keys(
-  ASSISTANT_ASSIGNMENT_META,
-) as AssistantAssignmentStatus[];
+const FILTERABLE_ASSISTANT_STATUSES: AssistantAssignmentStatus[] = [
+  "unassigned",
+  "assigned",
+];
+
+function assistantSummaryValue(
+  status: AssistantAssignmentStatus | null,
+  names: string[],
+) {
+  if (status === "assigned") return names.join(" · ");
+  if (status === "unassigned") return "미배정";
+  if (status === "not_required") return "불필요";
+  return "";
+}
 
 const DEFAULT_KIND_COLORS: Record<ScheduleKind, string> = {
   lecture: KIND_META.lecture.color,
@@ -156,40 +194,6 @@ const DEFAULT_KIND_COLORS: Record<ScheduleKind, string> = {
 };
 
 const INSTRUCTOR_COLOR_OVERRIDES: Record<string, string> = {};
-
-const INSTRUCTOR_COLOR_PALETTE = [
-  "#0369a1",
-  "#4338ca",
-  "#6d28d9",
-  "#a21caf",
-  "#be123c",
-  "#b45309",
-  "#3f6212",
-  "#047857",
-  "#0e7490",
-  "#1d4ed8",
-  "#9f1239",
-  "#92400e",
-];
-
-function instructorColor(
-  instructor: string,
-  customColors?: Record<string, string>,
-) {
-  const normalized = instructor.trim();
-  if (customColors?.[normalized]) {
-    return customColors[normalized];
-  }
-  if (INSTRUCTOR_COLOR_OVERRIDES[normalized]) {
-    return INSTRUCTOR_COLOR_OVERRIDES[normalized];
-  }
-
-  let hash = 0;
-  for (const character of normalized) {
-    hash = (hash * 31 + (character.codePointAt(0) ?? 0)) >>> 0;
-  }
-  return INSTRUCTOR_COLOR_PALETTE[hash % INSTRUCTOR_COLOR_PALETTE.length];
-}
 
 function isoFromLocalDate(date: Date) {
   const year = date.getFullYear();
@@ -258,6 +262,30 @@ function parentLectureLabel(schedule: Schedule) {
     .join(" · ");
 }
 
+function parentLectureAvailabilityMessage(
+  availability: ParentLectureAvailability,
+) {
+  if (availability === "cancelled_only") {
+    return "취소된 본강의만 있어 연결할 수 없습니다.";
+  }
+  if (availability === "non_lecture_only") {
+    return "같은 날짜에 기타 일정만 있습니다. 연결하려는 일정이라면 종류를 본강의로 변경해주세요.";
+  }
+  return "이 날짜에는 등록된 본강의가 없습니다.";
+}
+
+function parentLectureAvailabilityOptionLabel(
+  availability: ParentLectureAvailability,
+) {
+  if (availability === "cancelled_only") {
+    return "취소된 본강의만 있습니다";
+  }
+  if (availability === "non_lecture_only") {
+    return "기타로 분류된 일정만 있습니다";
+  }
+  return "이 날짜에는 본강의가 없습니다";
+}
+
 function scheduleIdentityKey(schedule: Schedule) {
   const untimedSession =
     schedule.startTime || schedule.endTime
@@ -278,6 +306,7 @@ function scheduleSlotKey(schedule: Schedule) {
   return [
     schedule.date,
     schedule.instructor.trim(),
+    schedule.kind,
     schedule.session || deriveSession(schedule.startTime),
   ]
     .join("|")
@@ -334,7 +363,7 @@ function classifyImportCandidate(
 
   const exactIdentityMatch = identityMatches[0];
   if (exactIdentityMatch) {
-    const nextSchedule = preserveImportedAssistantRequirement(
+    const nextSchedule = preserveImportedLectureClassification(
       schedule,
       exactIdentityMatch,
     );
@@ -381,7 +410,7 @@ function classifyImportCandidate(
     };
   }
   if (slotMatches.length === 1) {
-    const nextSchedule = preserveImportedAssistantRequirement(
+    const nextSchedule = preserveImportedLectureClassification(
       schedule,
       slotMatches[0],
     );
@@ -454,15 +483,6 @@ function normalizeLectureKeywords(value: unknown) {
         .filter(Boolean),
     ),
   );
-}
-
-function classifyExcelKind(remark: string, lectureKeywords: string[]) {
-  const normalizedRemark = remark.toLocaleLowerCase("ko-KR");
-  return lectureKeywords.some((keyword) =>
-    normalizedRemark.includes(keyword.toLocaleLowerCase("ko-KR")),
-  )
-    ? "lecture"
-    : "other";
 }
 
 function regionText(schedule: Schedule) {
@@ -576,7 +596,7 @@ export default function Home() {
   ]);
   const [assistantFilters, setAssistantFilters] = useState<
     AssistantAssignmentStatus[]
-  >([...ASSISTANT_ASSIGNMENT_STATUSES]);
+  >([...FILTERABLE_ASSISTANT_STATUSES]);
   const [editorSchedule, setEditorSchedule] = useState<Schedule | null>(null);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [isBulkSelectionMode, setIsBulkSelectionMode] = useState(false);
@@ -590,6 +610,9 @@ export default function Home() {
   const [lectureKeywords, setLectureKeywords] = useState<string[]>(
     DEFAULT_LECTURE_KEYWORDS,
   );
+  const [lectureKeywordColors, setLectureKeywordColors] = useState<
+    Record<string, string>
+  >(() => ensureLectureKeywordColors(DEFAULT_LECTURE_KEYWORDS, {}));
   const [lectureKeywordInput, setLectureKeywordInput] = useState("");
   const [importCandidates, setImportCandidates] = useState<ImportCandidate[]>([]);
   const [importFileName, setImportFileName] = useState("");
@@ -664,20 +687,36 @@ export default function Home() {
       loadRemoteWorkspace(),
       loadCurrentProfile(userId),
     ]);
-    setSchedules(workspace.schedules);
-    setInstructorOrder(workspace.instructors.map((item) => item.name));
-    setInstructorColors({
-      ...INSTRUCTOR_COLOR_OVERRIDES,
-      ...Object.fromEntries(
-        workspace.instructors.map((item) => [item.name, item.color]),
-      ),
-    });
+    const remoteInstructorOrder = workspace.instructors.map((item) => item.name);
+    const remoteInstructorColors = distributeInstructorColors(
+      remoteInstructorOrder,
+      {
+        ...INSTRUCTOR_COLOR_OVERRIDES,
+        ...Object.fromEntries(
+          workspace.instructors.map((item) => [item.name, item.color]),
+        ),
+      },
+    );
+    const remoteLectureKeywords = normalizeLectureKeywords(
+      workspace.settings.lectureKeywords,
+    );
+    const classificationRepair = promoteImportedLectureClassifications(
+      workspace.schedules,
+      remoteLectureKeywords,
+    );
+    setSchedules(classificationRepair.schedules);
+    setInstructorOrder(remoteInstructorOrder);
+    setInstructorColors(remoteInstructorColors);
     setKindColors({
       ...DEFAULT_KIND_COLORS,
       ...workspace.settings.kindColors,
     });
-    setLectureKeywords(
-      normalizeLectureKeywords(workspace.settings.lectureKeywords),
+    setLectureKeywords(remoteLectureKeywords);
+    setLectureKeywordColors(
+      ensureLectureKeywordColors(
+        remoteLectureKeywords,
+        workspace.settings.lectureKeywordColors,
+      ),
     );
     setCurrentProfile(profile);
     setRoleKey(
@@ -685,23 +724,55 @@ export default function Home() {
         ? "admin"
         : `instructor:${profile.instructorName || ""}`,
     );
+    if (
+      profile.role === "admin" &&
+      classificationRepair.promotedSchedules.length > 0
+    ) {
+      try {
+        const savedSchedules = await saveRemoteSchedules(
+          classificationRepair.promotedSchedules,
+        );
+        const savedById = new Map(
+          savedSchedules.map((schedule) => [schedule.id, schedule]),
+        );
+        setSchedules((current) =>
+          current.map((schedule) => savedById.get(schedule.id) || schedule),
+        );
+        setSyncMessage(
+          `${savedSchedules.length}개 기존 엑셀 일정을 본강의로 다시 분류했습니다.`,
+        );
+      } catch (error) {
+        setSyncMessage(
+          error instanceof Error
+            ? `기존 본강의 분류 저장 실패: ${error.message}`
+            : "기존 본강의 분류를 서버에 저장하지 못했습니다.",
+        );
+      }
+    }
     setHydrated(true);
   }, [setSchedules]);
 
   useEffect(() => {
     if (isSupabaseConfigured) return;
     const timer = window.setTimeout(() => {
+      let restoredSchedules: Schedule[] = [];
+      let restoredScheduleInstructors: string[] = [];
+      let restoredInstructorOrder = [...CORE_INSTRUCTORS];
+      let restoredLectureKeywords = [...DEFAULT_LECTURE_KEYWORDS];
       const saved = window.localStorage.getItem(STORAGE_KEY);
       if (saved) {
         try {
           const savedSchedules = JSON.parse(saved) as Schedule[];
-          setSchedules(
-            (Array.isArray(savedSchedules) ? savedSchedules : [])
-              .filter((schedule) => schedule.source !== "sample")
-              .map(normalizeAssistantRequirement),
+          restoredSchedules = (
+            Array.isArray(savedSchedules) ? savedSchedules : []
+          )
+            .filter((schedule) => schedule.source !== "sample")
+            .map(normalizeAssistantRequirement);
+          restoredScheduleInstructors = restoredSchedules.map(
+            (schedule) => schedule.instructor,
           );
         } catch {
-          setSchedules([]);
+          restoredSchedules = [];
         }
       }
       const savedColors = window.localStorage.getItem(COLOR_STORAGE_KEY);
@@ -733,7 +804,8 @@ export default function Home() {
       );
       if (savedInstructorOrder) {
         try {
-          setInstructorOrder(JSON.parse(savedInstructorOrder) as string[]);
+          restoredInstructorOrder = JSON.parse(savedInstructorOrder) as string[];
+          setInstructorOrder(restoredInstructorOrder);
         } catch {
           setInstructorOrder([...CORE_INSTRUCTORS]);
         }
@@ -743,13 +815,43 @@ export default function Home() {
       );
       if (savedLectureKeywords) {
         try {
-          setLectureKeywords(
-            normalizeLectureKeywords(JSON.parse(savedLectureKeywords)),
+          restoredLectureKeywords = normalizeLectureKeywords(
+            JSON.parse(savedLectureKeywords),
           );
+          setLectureKeywords(restoredLectureKeywords);
         } catch {
           setLectureKeywords([...DEFAULT_LECTURE_KEYWORDS]);
         }
       }
+      const savedLectureKeywordColors = window.localStorage.getItem(
+        LECTURE_KEYWORD_COLORS_STORAGE_KEY,
+      );
+      if (savedLectureKeywordColors) {
+        try {
+          setLectureKeywordColors(
+            JSON.parse(savedLectureKeywordColors) as Record<string, string>,
+          );
+        } catch {
+          setLectureKeywordColors(
+            ensureLectureKeywordColors(DEFAULT_LECTURE_KEYWORDS, {}),
+          );
+        }
+      }
+      const restoredInstructors = Array.from(
+        new Set([...restoredInstructorOrder, ...restoredScheduleInstructors]),
+      );
+      setInstructorColors((current) =>
+        distributeInstructorColors(restoredInstructors, current),
+      );
+      setLectureKeywordColors((current) =>
+        ensureLectureKeywordColors(restoredLectureKeywords, current),
+      );
+      setSchedules(
+        promoteImportedLectureClassifications(
+          restoredSchedules,
+          restoredLectureKeywords,
+        ).schedules,
+      );
       setHydrated(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -876,6 +978,15 @@ export default function Home() {
     }
   }, [hydrated, lectureKeywords]);
 
+  useEffect(() => {
+    if (hydrated && !isSupabaseConfigured) {
+      window.localStorage.setItem(
+        LECTURE_KEYWORD_COLORS_STORAGE_KEY,
+        JSON.stringify(lectureKeywordColors),
+      );
+    }
+  }, [hydrated, lectureKeywordColors]);
+
   const availableInstructors = useMemo(
     () =>
       Array.from(
@@ -895,6 +1006,7 @@ export default function Home() {
     ],
     [availableInstructors, instructorOrder],
   );
+
   const colorSettingInstructors =
     instructorFilter === "all"
       ? instructors
@@ -948,6 +1060,7 @@ export default function Home() {
   async function persistWorkspaceSettings(
     nextKindColors: Record<ScheduleKind, string>,
     nextLectureKeywords: string[],
+    nextLectureKeywordColors: Record<string, string>,
   ) {
     if (!isSupabaseConfigured || !isAdmin) return;
     setIsSyncing(true);
@@ -955,6 +1068,7 @@ export default function Home() {
       await saveRemoteWorkspaceSettings({
         kindColors: nextKindColors,
         lectureKeywords: nextLectureKeywords,
+        lectureKeywordColors: nextLectureKeywordColors,
       });
       setSyncMessage("공용 화면 설정이 서버에 저장되었습니다.");
     } catch (error) {
@@ -986,12 +1100,13 @@ export default function Home() {
     });
     const passesAssistantFilter = (schedule: Schedule) => {
       if (
-        assistantFilters.length === ASSISTANT_ASSIGNMENT_STATUSES.length
+        assistantFilters.length === FILTERABLE_ASSISTANT_STATUSES.length
       ) {
         return true;
       }
       const assignment = assistantAssignmentStatus(schedule, schedules);
-      return assignment !== null && assistantFilters.includes(assignment);
+      if (assignment === null || assignment === "not_required") return true;
+      return assistantFilters.includes(assignment);
     };
     const kindCountSource = instructorAndSearchSchedules.filter(
       (schedule) =>
@@ -1029,7 +1144,7 @@ export default function Home() {
         ]),
       ) as Record<ScheduleStatus, number>,
       assistantCounts: Object.fromEntries(
-        ASSISTANT_ASSIGNMENT_STATUSES.map((status) => [
+        FILTERABLE_ASSISTANT_STATUSES.map((status) => [
           status,
           assistantCountSource.filter(
             (schedule) =>
@@ -1047,12 +1162,18 @@ export default function Home() {
     statusFilters,
   ]);
 
+  const groupedCalendarSchedules = useMemo(
+    () => groupLinkedAssistantSchedules(filteredSchedules),
+    [filteredSchedules],
+  );
+
   const calendarEvents = useMemo<EventInput[]>(
     () =>
-      filteredSchedules.map((schedule) => {
+      groupedCalendarSchedules.map((schedule) => {
         const meta = KIND_META[schedule.kind];
         const isAllDay = !schedule.startTime || !schedule.endTime;
         const assistantStatus = assistantAssignmentStatus(schedule, schedules);
+        const assistantNames = assignedAssistantNames(schedule, schedules);
         return {
           id: schedule.id,
           title: [
@@ -1083,19 +1204,28 @@ export default function Home() {
           ],
           extendedProps: {
             schedule,
-            kindColor: kindColors[schedule.kind],
+            courseColor: lectureClassificationColor(
+              schedule,
+              schedules,
+              lectureKeywords,
+              lectureKeywordColors,
+              kindColors[schedule.kind],
+            ),
             assistantStatus,
+            assistantNames,
           },
         };
       }),
     [
       activeInstructor,
       bulkSelectedScheduleIds,
-      filteredSchedules,
+      groupedCalendarSchedules,
       instructorColors,
       instructors,
       isAdmin,
       kindColors,
+      lectureKeywordColors,
+      lectureKeywords,
       schedules,
     ],
   );
@@ -1123,7 +1253,7 @@ export default function Home() {
 
   const mobileSelectedSchedules = useMemo(
     () =>
-      filteredSchedules
+      groupedCalendarSchedules
         .filter((schedule) => schedule.date === mobileSelectedDate)
         .sort((a, b) => {
           const timeOrder = (a.startTime || "99:99").localeCompare(
@@ -1132,7 +1262,7 @@ export default function Home() {
           if (timeOrder !== 0) return timeOrder;
           return instructors.indexOf(a.instructor) - instructors.indexOf(b.instructor);
         }),
-    [filteredSchedules, instructors, mobileSelectedDate],
+    [groupedCalendarSchedules, instructors, mobileSelectedDate],
   );
 
   function changeView(view: CalendarView) {
@@ -1155,6 +1285,63 @@ export default function Home() {
     const nextOrder = arrayMove(instructors, oldIndex, newIndex);
     setInstructorOrder(nextOrder);
     void persistInstructorConfiguration(nextOrder, instructorColors);
+  }
+
+  async function deleteInstructor(instructor: string) {
+    if (!isAdmin) return;
+    const impact = instructorDeletionImpact(schedules, instructor);
+    const detail = impact.totalScheduleCount
+      ? [
+          `해당 강사의 일정 ${impact.directScheduleCount}건`,
+          impact.linkedAssistantCount
+            ? `연결된 다른 강사의 보조강의 ${impact.linkedAssistantCount}건`
+            : "",
+          `총 ${impact.totalScheduleCount}건이 함께 삭제됩니다.`,
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "등록된 일정은 없습니다.";
+    if (
+      !window.confirm(
+        `${instructor} 강사를 삭제할까요?\n\n${detail}\n삭제한 내용은 복구할 수 없습니다.`,
+      )
+    ) {
+      return;
+    }
+
+    if (isSupabaseConfigured) {
+      setIsSyncing(true);
+      try {
+        await deleteRemoteInstructor(instructor);
+        setSyncMessage(`${instructor} 강사와 관련 일정을 삭제했습니다.`);
+      } catch (error) {
+        showSyncError(error, "강사를 삭제하지 못했습니다.");
+        setIsSyncing(false);
+        return;
+      }
+      setIsSyncing(false);
+    }
+
+    const deletedIds = new Set(impact.scheduleIds);
+    setSchedules((items) => removeInstructorSchedules(items, instructor));
+    setInstructorOrder((items) =>
+      items.filter((item) => item !== instructor),
+    );
+    setInstructorColors((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([name]) => name !== instructor),
+      ),
+    );
+    setInstructorFilter((current) =>
+      current === instructor ? "all" : current,
+    );
+    setBulkSelectedScheduleIds((current) =>
+      current.filter((id) => !deletedIds.has(id)),
+    );
+    if (editorSchedule && deletedIds.has(editorSchedule.id)) {
+      setIsEditorOpen(false);
+      setEditorSchedule(null);
+    }
   }
 
   function openNewSchedule(date = TODAY, startTime?: string) {
@@ -1181,13 +1368,13 @@ export default function Home() {
 
   function openScheduleForVisibleDate() {
     const calendarDate = calendarRef.current?.getApi().getDate();
-    openNewSchedule(
-      calendarView === "dayGridMonth"
-        ? mobileSelectedDate
-        : calendarDate
-          ? isoFromLocalDate(calendarDate)
-          : TODAY,
-    );
+    openNewSchedule(registrationDate({
+      view: calendarView,
+      mobile: isMobileLayout,
+      mobileSelectedDate,
+      calendarDate: calendarDate ? isoFromLocalDate(calendarDate) : undefined,
+      today: TODAY,
+    }));
   }
 
   function toggleBulkDate(date: string) {
@@ -1236,6 +1423,24 @@ export default function Home() {
       return;
     }
     setEditorSchedule(schedule);
+    setBulkEditorDates(null);
+    setIsEditorOpen(true);
+  }
+
+  function openAssistantForLecture(lecture: Schedule) {
+    const preferredInstructor =
+      (activeInstructor && activeInstructor !== lecture.instructor
+        ? activeInstructor
+        : undefined) ||
+      (instructorFilter !== "all" && instructorFilter !== lecture.instructor
+        ? instructorFilter
+        : undefined) ||
+      instructors.find((instructor) => instructor !== lecture.instructor) ||
+      activeInstructor ||
+      lecture.instructor;
+    setEditorSchedule(
+      assistantDraftFromLecture(lecture, preferredInstructor),
+    );
     setBulkEditorDates(null);
     setIsEditorOpen(true);
   }
@@ -1445,7 +1650,7 @@ export default function Home() {
         if (isAdmin) {
           await deleteRemoteSchedule(schedule.id);
           setSchedules((items) =>
-            items.filter((item) => item.id !== schedule.id),
+            removeScheduleWithLinkedAssistants(items, schedule.id),
           );
         } else if (schedule.instructor === activeInstructor) {
           const cancelled: Schedule = {
@@ -1466,7 +1671,9 @@ export default function Home() {
       }
       setIsSyncing(false);
     } else if (isAdmin) {
-      setSchedules((items) => items.filter((item) => item.id !== schedule.id));
+      setSchedules((items) =>
+        removeScheduleWithLinkedAssistants(items, schedule.id),
+      );
     } else if (schedule.instructor === activeInstructor) {
       setSchedules((items) =>
         items.map((item) =>
@@ -1570,7 +1777,10 @@ export default function Home() {
           const rawNote = readCellText(row.getCell(noteColumn).value);
           const cancelled = /연기|취소/.test(rawNote);
           const pending = /미정|연기/.test(rawVenue);
-          const importedKind = classifyExcelKind(rawNote, lectureKeywords);
+          const importedKind = classifyImportedScheduleKind(
+            rawNote,
+            lectureKeywords,
+          );
           const sourceNote = [
             pending && rawVenue ? `원본 장소 표기: ${rawVenue}` : "",
             cancelled && rawVenue ? rawVenue : "",
@@ -1626,12 +1836,55 @@ export default function Home() {
 
   function applyLectureKeywords(nextKeywords: string[]) {
     const normalizedKeywords = normalizeLectureKeywords(nextKeywords);
+    const nextKeywordColors = ensureLectureKeywordColors(
+      normalizedKeywords,
+      lectureKeywordColors,
+    );
+    const classificationRepair = promoteImportedLectureClassifications(
+      schedules,
+      normalizedKeywords,
+    );
     setLectureKeywords(normalizedKeywords);
-    void persistWorkspaceSettings(kindColors, normalizedKeywords);
+    setLectureKeywordColors(nextKeywordColors);
+    if (classificationRepair.promotedSchedules.length > 0) {
+      setSchedules(classificationRepair.schedules);
+    }
+    if (isSupabaseConfigured && isAdmin) {
+      setIsSyncing(true);
+      void Promise.all([
+        saveRemoteWorkspaceSettings({
+          kindColors,
+          lectureKeywords: normalizedKeywords,
+          lectureKeywordColors: nextKeywordColors,
+        }),
+        saveRemoteSchedules(classificationRepair.promotedSchedules),
+      ])
+        .then(([, savedSchedules]) => {
+          if (savedSchedules.length > 0) {
+            const savedById = new Map(
+              savedSchedules.map((schedule) => [schedule.id, schedule]),
+            );
+            setSchedules((current) =>
+              current.map(
+                (schedule) => savedById.get(schedule.id) || schedule,
+              ),
+            );
+            setSyncMessage(
+              `${savedSchedules.length}개 기존 엑셀 일정을 본강의로 다시 분류했습니다.`,
+            );
+          } else {
+            setSyncMessage("공용 화면 설정이 서버에 저장되었습니다.");
+          }
+        })
+        .catch((error: unknown) => {
+          showSyncError(error, "본강의 판별 항목을 저장하지 못했습니다.");
+        })
+        .finally(() => setIsSyncing(false));
+    }
     setImportCandidates((current) =>
       current.map((candidate) => {
         if (!candidate.schedule) return candidate;
-        const kind = classifyExcelKind(
+        const kind = classifyImportedScheduleKind(
           candidate.schedule.topic || "",
           normalizedKeywords,
         );
@@ -1647,7 +1900,7 @@ export default function Home() {
         };
         return classifyImportCandidate(
           schedule,
-          schedules,
+          classificationRepair.schedules,
           {
             key: candidate.key,
             rowNumber: candidate.rowNumber,
@@ -1685,6 +1938,19 @@ export default function Home() {
     );
   }
 
+  function changeLectureKeywordColor(keyword: string, color: string) {
+    const nextKeywordColors = {
+      ...lectureKeywordColors,
+      [lectureKeywordColorKey(keyword)]: color,
+    };
+    setLectureKeywordColors(nextKeywordColors);
+    void persistWorkspaceSettings(
+      kindColors,
+      lectureKeywords,
+      nextKeywordColors,
+    );
+  }
+
   async function applyImport() {
     const importedInstructors = Array.from(
       new Set(
@@ -1697,6 +1963,10 @@ export default function Home() {
       ...instructorOrder,
       ...importedInstructors.filter((name) => !instructorOrder.includes(name)),
     ];
+    const nextInstructorColors = distributeInstructorColors(
+      nextInstructorOrder,
+      instructorColors,
+    );
     const changedSchedules = importCandidates.flatMap((candidate) => {
       if (!candidate.schedule) return [];
       if (candidate.action === "new") {
@@ -1714,7 +1984,7 @@ export default function Home() {
         await saveRemoteInstructors(
           nextInstructorOrder.map((name, index) => ({
             name,
-            color: instructorColor(name, instructorColors),
+            color: instructorColor(name, nextInstructorColors),
             sortOrder: index,
           })),
         );
@@ -1739,6 +2009,7 @@ export default function Home() {
       setIsSyncing(false);
     } else {
       setInstructorOrder(nextInstructorOrder);
+      setInstructorColors(nextInstructorColors);
       setSchedules((items) => {
         const next = [...items];
         changedSchedules.forEach((schedule) => {
@@ -1872,7 +2143,7 @@ export default function Home() {
           </button>
         </div>
 
-        <button className="primary-action" onClick={() => openNewSchedule()}>
+        <button className="primary-action" onClick={openScheduleForVisibleDate}>
           <Plus size={18} />
           일정 등록
         </button>
@@ -1923,6 +2194,7 @@ export default function Home() {
                         (!isSupabaseConfigured && instructor === activeInstructor)
                       }
                       canReorder={isAdmin && instructorFilter === "all"}
+                      canDelete={isAdmin}
                       onColorChange={(color) => {
                         const nextColors = {
                           ...instructorColors,
@@ -1934,6 +2206,7 @@ export default function Home() {
                           nextColors,
                         );
                       }}
+                      onDelete={() => void deleteInstructor(instructor)}
                     />
                   ))}
                 </div>
@@ -1999,8 +2272,15 @@ export default function Home() {
               const meta = KIND_META[kind];
               const color = kindColors[kind];
               const checked = kindFilters.includes(kind);
+              const canSetKindColor = kind !== "lecture" && kind !== "assistant";
+              const filterColor = canSetKindColor ? color : meta.color;
               return (
-                <div className="kind-filter-row" key={kind}>
+                <div
+                  className={`kind-filter-row ${
+                    canSetKindColor ? "has-color-control" : ""
+                  }`}
+                  key={kind}
+                >
                   <label className="filter-check">
                     <input
                       type="checkbox"
@@ -2010,41 +2290,47 @@ export default function Home() {
                     <span
                       className="check-box"
                       style={{
-                        background: checked ? color : "transparent",
-                        borderColor: checked ? color : "#cbd5e1",
+                        background: checked ? filterColor : "transparent",
+                        borderColor: checked ? filterColor : "#cbd5e1",
                       }}
                     >
                       {checked && <Check size={12} />}
                     </span>
-                    <span className="kind-dot" style={{ background: color }} />
+                    <span
+                      className="kind-dot"
+                      style={{ background: filterColor }}
+                    />
                     {meta.label}
                     <span className="filter-count">
                       {kindCounts[kind]}
                     </span>
                   </label>
-                  <input
-                    className="kind-color-input"
-                    type="color"
-                    value={color}
-                    disabled={!isAdmin}
-                    aria-label={`${meta.label} 색상 선택`}
-                    title={
-                      isAdmin
-                        ? `${meta.label} 색상 선택`
-                        : "전체 관리자만 변경할 수 있습니다"
-                    }
-                    onChange={(event) => {
-                      const nextColors = {
-                        ...kindColors,
-                        [kind]: event.target.value,
-                      };
-                      setKindColors(nextColors);
-                      void persistWorkspaceSettings(
-                        nextColors,
-                        lectureKeywords,
-                      );
-                    }}
-                  />
+                  {canSetKindColor && (
+                    <input
+                      className="kind-color-input"
+                      type="color"
+                      value={color}
+                      disabled={!isAdmin}
+                      aria-label={`${meta.label} 색상 선택`}
+                      title={
+                        isAdmin
+                          ? `${meta.label} 색상 선택`
+                          : "전체 관리자만 변경할 수 있습니다"
+                      }
+                      onChange={(event) => {
+                        const nextColors = {
+                          ...kindColors,
+                          [kind]: event.target.value,
+                        };
+                        setKindColors(nextColors);
+                        void persistWorkspaceSettings(
+                          nextColors,
+                          lectureKeywords,
+                          lectureKeywordColors,
+                        );
+                      }}
+                    />
+                  )}
                 </div>
               );
             })}
@@ -2121,21 +2407,21 @@ export default function Home() {
                 onClick={() =>
                   setAssistantFilters(
                     assistantFilters.length ===
-                      ASSISTANT_ASSIGNMENT_STATUSES.length
+                      FILTERABLE_ASSISTANT_STATUSES.length
                       ? []
-                      : [...ASSISTANT_ASSIGNMENT_STATUSES],
+                      : [...FILTERABLE_ASSISTANT_STATUSES],
                   )
                 }
               >
                 {assistantFilters.length ===
-                ASSISTANT_ASSIGNMENT_STATUSES.length
+                FILTERABLE_ASSISTANT_STATUSES.length
                   ? "전체 해제"
                   : "전체 선택"}
               </button>
             </span>
           </div>
           <div className="status-filter-list">
-            {ASSISTANT_ASSIGNMENT_STATUSES.map((status) => {
+            {FILTERABLE_ASSISTANT_STATUSES.map((status) => {
               const meta = ASSISTANT_ASSIGNMENT_META[status];
               const checked = assistantFilters.includes(status);
               return (
@@ -2455,6 +2741,7 @@ export default function Home() {
               firstDay={0}
               height={isMobileLayout ? "auto" : "100%"}
               expandRows={!isMobileLayout}
+              showNonCurrentDates={false}
               nowIndicator
               navLinks={false}
               selectable
@@ -2530,72 +2817,134 @@ export default function Home() {
               }}
               eventContent={(content: EventContentArg) => {
                 const schedule = content.event.extendedProps.schedule as Schedule;
-                const kindColor = content.event.extendedProps.kindColor as string;
+                const courseColor = content.event.extendedProps
+                  .courseColor as string;
                 const assistantStatus = content.event.extendedProps
                   .assistantStatus as AssistantAssignmentStatus | null;
+                const assistantNames = (content.event.extendedProps
+                  .assistantNames || []) as string[];
                 const meta = KIND_META[schedule.kind];
                 const eventColor = instructorColor(
                   schedule.instructor,
                   instructorColors,
                 );
-                return (
-                  <div
-                    className={`calendar-event-content ${
-                      content.view.type === "dayGridMonth"
-                        ? "month-event-content"
-                        : content.view.type === "listWeek"
-                          ? "list-event-content"
-                          : "time-event-content"
-                    }`}
-                    style={{ "--event-color": eventColor } as React.CSSProperties}
-                  >
-                    <span
-                      className="event-kind-badge"
+                const isMonthView = content.view.type === "dayGridMonth";
+                const eventTime =
+                  schedule.startTime && schedule.endTime
+                    ? `${schedule.startTime}~${schedule.endTime}`
+                    : schedule.startTime ||
+                      (schedule.kind === "off" ? "종일" : "시간 미정");
+                const courseLabel = schedule.topic || meta.label;
+                const eventPlace =
+                  schedule.kind === "office" || schedule.kind === "off"
+                    ? ""
+                    : [schedule.region || "지역 미정", schedule.venue]
+                        .filter(Boolean)
+                        .join(" · ");
+                const assistantSummary = assistantSummaryValue(
+                  assistantStatus,
+                  assistantNames,
+                );
+                const assistantSummaryColor = assistantStatus
+                  ? ASSISTANT_ASSIGNMENT_META[assistantStatus].color
+                  : undefined;
+
+                if (isMonthView) {
+                  return (
+                    <div
+                      className={`calendar-event-content month-event-content ${
+                        assistantSummary ? "has-assistant-summary" : ""
+                      }`}
                       style={
                         {
-                          "--badge-color": kindColor,
+                          "--event-color": eventColor,
+                          "--course-color": courseColor,
                         } as React.CSSProperties
                       }
                     >
-                      {meta.label}
+                      <span className="month-event-topline">
+                        <span className="month-event-time">{eventTime}</span>
+                        <span className="month-event-course">{courseLabel}</span>
+                      </span>
+                      <strong className="month-event-instructor">
+                        {schedule.instructor}
+                      </strong>
+                      {eventPlace && (
+                        <span className="month-event-place">{eventPlace}</span>
+                      )}
+                      {assistantSummary && (
+                        <span
+                          className="event-assistant-summary month-event-assistant"
+                          style={
+                            {
+                              "--assistant-color": assistantSummaryColor,
+                            } as React.CSSProperties
+                          }
+                        >
+                          <span className="event-assistant-label">보조강사:</span>
+                          <strong>{assistantSummary}</strong>
+                        </span>
+                      )}
+                    </div>
+                  );
+                }
+
+                return (
+                  <div
+                    className={`calendar-event-content agenda-event-content ${
+                      content.view.type === "listWeek"
+                        ? "list-event-content"
+                        : "time-event-content"
+                    } ${content.event.allDay ? "all-day-event-content" : ""} ${
+                      assistantSummary ? "has-assistant-summary" : ""
+                    }`}
+                    style={
+                      {
+                        "--event-color": eventColor,
+                        "--course-color": courseColor,
+                      } as React.CSSProperties
+                    }
+                  >
+                    <span className="agenda-event-topline">
+                      <span className="agenda-event-time">{eventTime}</span>
+                      <span className="agenda-event-course">{courseLabel}</span>
                     </span>
-                    {schedule.status !== "confirmed" && (
+                    <span className="agenda-event-mainline">
+                      <strong className="agenda-event-instructor">
+                        {schedule.instructor}
+                      </strong>
+                      <span className="agenda-event-flags">
+                        {schedule.status !== "confirmed" && (
+                          <span
+                            className="agenda-event-flag"
+                            style={
+                              {
+                                "--flag-color":
+                                  STATUS_META[schedule.status].color,
+                              } as React.CSSProperties
+                            }
+                          >
+                            {STATUS_META[schedule.status].label}
+                          </span>
+                        )}
+                      </span>
+                    </span>
+                    {eventPlace && (
+                      <span className="agenda-event-place">{eventPlace}</span>
+                    )}
+                    {assistantSummary && (
                       <span
-                        className="event-kind-badge event-status-badge"
+                        className="event-assistant-summary agenda-event-assistant"
                         style={
                           {
-                            "--badge-color": STATUS_META[schedule.status].color,
+                            "--assistant-color": assistantSummaryColor,
                           } as React.CSSProperties
                         }
                       >
-                        {STATUS_META[schedule.status].label}
+                        <span className="event-assistant-label">보조강사:</span>
+                        <strong>{assistantSummary}</strong>
                       </span>
                     )}
-                    {(assistantStatus === "unassigned" ||
-                      assistantStatus === "not_required") && (
-                      <span
-                        className="event-kind-badge event-assistant-badge"
-                        style={
-                          {
-                            "--badge-color":
-                              ASSISTANT_ASSIGNMENT_META[assistantStatus].color,
-                          } as React.CSSProperties
-                        }
-                      >
-                        {ASSISTANT_ASSIGNMENT_META[assistantStatus].label}
-                      </span>
-                    )}
-                    <b>{schedule.instructor}</b>
-                    <span className="event-topic">
-                      {schedule.topic || meta.label}
-                    </span>
-                    {regionText(schedule) && (
-                      <span className="event-region">{regionText(schedule)}</span>
-                    )}
-                    <span className="event-time">
-                      {schedule.startTime ||
-                        (schedule.kind === "off" ? "종일" : "시간 미정")}
-                    </span>
                   </div>
                 );
               }}
@@ -2620,38 +2969,65 @@ export default function Home() {
 
               <div className="mobile-agenda-list">
                 {mobileSelectedSchedules.length ? (
-                  mobileSelectedSchedules.map((schedule) => (
-                    <button
-                      type="button"
-                      className={`mobile-agenda-event schedule-${schedule.status}`}
-                      key={schedule.id}
-                      style={
-                        {
-                          "--instructor-color": instructorColor(
-                            schedule.instructor,
-                            instructorColors,
-                          ),
-                        } as React.CSSProperties
-                      }
-                      onClick={() => handleScheduleClick(schedule)}
-                    >
-                      <span className="mobile-agenda-time">
-                        {schedule.startTime ||
-                          (schedule.kind === "off" ? "종일" : "미정")}
-                      </span>
-                      <span className="mobile-agenda-copy">
-                        <strong>{schedule.instructor}</strong>
-                        <span>{schedule.topic || KIND_META[schedule.kind].label}</span>
-                        {regionText(schedule) && <small>{regionText(schedule)}</small>}
-                      </span>
-                      <span
-                        className="mobile-agenda-kind"
-                        style={{ background: kindColors[schedule.kind] }}
+                  mobileSelectedSchedules.map((schedule) => {
+                    const assistantStatus = assistantAssignmentStatus(
+                      schedule,
+                      schedules,
+                    );
+                    const assistantSummary = assistantSummaryValue(
+                      assistantStatus,
+                      assignedAssistantNames(schedule, schedules),
+                    );
+
+                    return (
+                      <button
+                        type="button"
+                        className={`mobile-agenda-event schedule-${schedule.status}`}
+                        key={schedule.id}
+                        style={
+                          {
+                            "--instructor-color": instructorColor(
+                              schedule.instructor,
+                              instructorColors,
+                            ),
+                          } as React.CSSProperties
+                        }
+                        onClick={() => handleScheduleClick(schedule)}
                       >
-                        {KIND_META[schedule.kind].label}
-                      </span>
-                    </button>
-                  ))
+                        <span className="mobile-agenda-time">
+                          {schedule.startTime ||
+                            (schedule.kind === "off" ? "종일" : "미정")}
+                        </span>
+                        <span className="mobile-agenda-copy">
+                          <strong>{schedule.instructor}</strong>
+                          <span>
+                            {schedule.topic || KIND_META[schedule.kind].label}
+                          </span>
+                          {regionText(schedule) && (
+                            <small>{regionText(schedule)}</small>
+                          )}
+                          {assistantSummary && assistantStatus && (
+                            <small
+                              className="mobile-agenda-assistant"
+                              style={{
+                                color:
+                                  ASSISTANT_ASSIGNMENT_META[assistantStatus]
+                                    .color,
+                              }}
+                            >
+                              보조강사: <b>{assistantSummary}</b>
+                            </small>
+                          )}
+                        </span>
+                        <span
+                          className="mobile-agenda-kind"
+                          style={{ background: kindColors[schedule.kind] }}
+                        >
+                          {KIND_META[schedule.kind].label}
+                        </span>
+                      </button>
+                    );
+                  })
                 ) : (
                   <p className="mobile-agenda-empty">
                     현재 필터에 맞는 일정이 없습니다.
@@ -2692,6 +3068,7 @@ export default function Home() {
           schedule={editorSchedule}
           instructors={instructors}
           mainLectures={mainLectures}
+          allSchedules={schedules}
           bulkDates={bulkEditorDates || undefined}
           kindColors={kindColors}
           isAdmin={isAdmin}
@@ -2704,6 +3081,7 @@ export default function Home() {
           onClose={() => setIsEditorOpen(false)}
           onSave={saveSchedule}
           onBulkSave={saveBulkSchedules}
+          onAddAssistant={openAssistantForLecture}
           onDelete={deleteSchedule}
         />
       )}
@@ -2764,7 +3142,23 @@ export default function Home() {
                   {lectureKeywords.length > 0 ? (
                     lectureKeywords.map((keyword) => (
                       <span key={keyword}>
-                        {keyword}
+                        <input
+                          type="color"
+                          value={
+                            lectureKeywordColors[
+                              lectureKeywordColorKey(keyword)
+                            ]
+                          }
+                          aria-label={`${keyword} 판별 항목 색상 선택`}
+                          title={`${keyword} 판별 항목 색상 선택`}
+                          onChange={(event) =>
+                            changeLectureKeywordColor(
+                              keyword,
+                              event.target.value,
+                            )
+                          }
+                        />
+                        <b>{keyword}</b>
                         <button
                           type="button"
                           aria-label={`${keyword} 항목 삭제`}
@@ -3010,13 +3404,17 @@ function SortableInstructorColorRow({
   color,
   canChangeColor,
   canReorder,
+  canDelete,
   onColorChange,
+  onDelete,
 }: {
   instructor: string;
   color: string;
   canChangeColor: boolean;
   canReorder: boolean;
+  canDelete: boolean;
   onColorChange: (color: string) => void;
+  onDelete: () => void;
 }) {
   const {
     attributes,
@@ -3032,7 +3430,9 @@ function SortableInstructorColorRow({
       ref={setNodeRef}
       className={`instructor-color-row ${
         canChangeColor ? "" : "is-locked"
-      } ${isDragging ? "is-dragging" : ""}`}
+      } ${canDelete ? "can-delete" : ""} ${
+        isDragging ? "is-dragging" : ""
+      }`}
       style={{
         transform: CSS.Transform.toString(transform),
         transition,
@@ -3066,6 +3466,17 @@ function SortableInstructorColorRow({
         }
         onChange={(event) => onColorChange(event.target.value)}
       />
+      {canDelete && (
+        <button
+          type="button"
+          className="instructor-delete-button"
+          aria-label={`${instructor} 강사 삭제`}
+          title={`${instructor} 강사와 관련 일정 삭제`}
+          onClick={onDelete}
+        >
+          <Trash2 size={16} />
+        </button>
+      )}
     </div>
   );
 }
@@ -3074,6 +3485,7 @@ function ScheduleEditor({
   schedule,
   instructors,
   mainLectures,
+  allSchedules,
   bulkDates,
   kindColors,
   isAdmin,
@@ -3083,11 +3495,13 @@ function ScheduleEditor({
   onClose,
   onSave,
   onBulkSave,
+  onAddAssistant,
   onDelete,
 }: {
   schedule: Schedule;
   instructors: string[];
   mainLectures: Schedule[];
+  allSchedules: Schedule[];
   bulkDates?: string[];
   kindColors: Record<ScheduleKind, string>;
   isAdmin: boolean;
@@ -3101,6 +3515,7 @@ function ScheduleEditor({
     dates: string[],
     parentScheduleIds: Record<string, string>,
   ) => void;
+  onAddAssistant: (lecture: Schedule) => void;
   onDelete: (schedule: Schedule) => void;
 }) {
   const [form, setForm] = useState(schedule);
@@ -3132,6 +3547,16 @@ function ScheduleEditor({
   );
   const selectedMainLecture = availableMainLectures.find(
     (lecture) => lecture.id === form.parentScheduleId,
+  );
+  const currentParentAvailability = parentLectureAvailability(
+    form.date,
+    allSchedules,
+    schedule.id,
+  );
+  const hasSelectableMainLectures = availableMainLectures.some(
+    (lecture) =>
+      lecture.status !== "cancelled" ||
+      lecture.id === form.parentScheduleId,
   );
   const hasAllBulkParentLectures = Boolean(
     bulkDates?.every((date) => {
@@ -3168,6 +3593,15 @@ function ScheduleEditor({
   }
 
   function chooseKind(kind: ScheduleKind) {
+    if (
+      kind === "assistant" &&
+      !isNew &&
+      !isBulk &&
+      schedule.kind === "lecture"
+    ) {
+      onAddAssistant(schedule);
+      return;
+    }
     if (kind === "assistant" && bulkDates) {
       const automaticParents = Object.fromEntries(
         bulkDates.flatMap((date) => {
@@ -3352,6 +3786,17 @@ function ScheduleEditor({
                   보조 불필요
                 </button>
               </div>
+              {!isNew && schedule.kind === "lecture" && (
+                <button
+                  type="button"
+                  className="secondary-button assistant-add-button"
+                  disabled={!editable}
+                  onClick={() => onAddAssistant(schedule)}
+                >
+                  <Plus size={16} />
+                  보조강의 추가
+                </button>
+              )}
             </div>
           )}
 
@@ -3426,6 +3871,11 @@ function ScheduleEditor({
                       (lecture) =>
                         lecture.date === date && lecture.status !== "cancelled",
                     );
+                    const availability = parentLectureAvailability(
+                      date,
+                      allSchedules,
+                      schedule.id,
+                    );
                     return (
                       <label className="bulk-parent-lecture-row" key={date}>
                         <span>{date}</span>
@@ -3442,7 +3892,9 @@ function ScheduleEditor({
                           <option value="">
                             {candidates.length > 0
                               ? "본강의를 선택하세요"
-                              : "해당 날짜에 본강의가 없습니다"}
+                              : parentLectureAvailabilityOptionLabel(
+                                  availability,
+                                )}
                           </option>
                           {candidates.map((lecture) => (
                             <option key={lecture.id} value={lecture.id}>
@@ -3459,13 +3911,15 @@ function ScheduleEditor({
                   <span>본강의 선택</span>
                   <select
                     value={selectedMainLecture?.id || ""}
-                    disabled={!editable || availableMainLectures.length === 0}
+                    disabled={!editable || !hasSelectableMainLectures}
                     onChange={(event) => chooseParentLecture(event.target.value)}
                   >
                     <option value="">
-                      {availableMainLectures.length > 0
+                      {hasSelectableMainLectures
                         ? "본강의를 선택하세요"
-                        : "이 날짜에는 등록된 본강의가 없습니다"}
+                        : parentLectureAvailabilityOptionLabel(
+                            currentParentAvailability,
+                          )}
                     </option>
                     {availableMainLectures.map((lecture) => (
                       <option
@@ -3482,6 +3936,16 @@ function ScheduleEditor({
                   </select>
                 </label>
               )}
+              {!isBulk &&
+                !selectedMainLecture &&
+                currentParentAvailability !== "available" &&
+                currentParentAvailability !== "empty" && (
+                  <small className="parent-lecture-warning">
+                    {parentLectureAvailabilityMessage(
+                      currentParentAvailability,
+                    )}
+                  </small>
+                )}
               <small>
                 {isBulk
                   ? "후보가 하나뿐인 날짜는 자동 선택됩니다. 각 본강의의 시간, 지역, 장소, 강의명과 상태가 적용됩니다."
@@ -3748,12 +4212,7 @@ function ScheduleEditor({
           {editable && (
             <button
               className="primary-button"
-              disabled={
-                !form.date ||
-                !form.instructor ||
-                hasPartialTime ||
-                hasInvalidTime
-              }
+              disabled={!canSubmit}
               onClick={submit}
             >
               <Check size={17} />

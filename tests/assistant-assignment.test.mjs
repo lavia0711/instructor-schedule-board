@@ -2,10 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assignedAssistantNames,
+  assistantDraftFromLecture,
   assistantAssignmentStatus,
+  groupLinkedAssistantSchedules,
   normalizeAssistantRequirement,
+  parentLectureAvailability,
   preserveImportedAssistantRequirement,
+  preserveImportedLectureClassification,
 } from "../lib/assistant-assignment.ts";
+
+test("adding an assistant from a lecture keeps the lecture as its parent", () => {
+  const lecture = schedule({
+    id: "lecture-july-7",
+    date: "2026-07-07",
+    instructor: "본 강사",
+    topic: "제미나이 실무",
+    region: "서울",
+    venue: "교육장",
+  });
+
+  const draft = assistantDraftFromLecture(
+    lecture,
+    "보조 강사",
+    "2026-07-21T00:00:00.000Z",
+  );
+
+  assert.equal(draft.id, "");
+  assert.equal(draft.kind, "assistant");
+  assert.equal(draft.parentScheduleId, lecture.id);
+  assert.equal(draft.date, "2026-07-07");
+  assert.equal(draft.instructor, "보조 강사");
+  assert.equal(draft.topic, lecture.topic);
+  assert.equal(lecture.kind, "lecture");
+});
 
 function schedule(overrides = {}) {
   return {
@@ -69,6 +99,61 @@ test("not-required and cancelled lectures are handled separately", () => {
   );
 });
 
+test("assigned assistant names include unique active linked instructors", () => {
+  const main = schedule();
+  const first = schedule({
+    id: "assistant-1",
+    instructor: "Assistant Kim",
+    kind: "assistant",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+  const duplicate = schedule({
+    id: "assistant-2",
+    instructor: " Assistant Kim ",
+    kind: "assistant",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+  const cancelled = schedule({
+    id: "assistant-3",
+    instructor: "Assistant Park",
+    kind: "assistant",
+    status: "cancelled",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+
+  assert.deepEqual(
+    assignedAssistantNames(main, [main, first, duplicate, cancelled]),
+    ["Assistant Kim"],
+  );
+});
+
+test("linked assistant cards collapse only while their lecture is visible", () => {
+  const main = schedule();
+  const linked = schedule({
+    id: "assistant-linked",
+    kind: "assistant",
+    parentScheduleId: main.id,
+    assistantRequired: false,
+  });
+  const unlinked = schedule({
+    id: "assistant-unlinked",
+    kind: "assistant",
+    parentScheduleId: undefined,
+    assistantRequired: false,
+  });
+
+  assert.deepEqual(
+    groupLinkedAssistantSchedules([main, linked, unlinked]).map(
+      (item) => item.id,
+    ),
+    [main.id, unlinked.id],
+  );
+  assert.deepEqual(groupLinkedAssistantSchedules([linked]), [linked]);
+});
+
 test("Excel updates preserve a user's not-required decision", () => {
   const previous = schedule({ assistantRequired: false });
   const imported = schedule({
@@ -86,6 +171,54 @@ test("Excel updates preserve a user's not-required decision", () => {
     preserveImportedAssistantRequirement(imported).assistantRequired,
     true,
   );
+});
+
+test("Excel updates do not downgrade an existing lecture to other", () => {
+  const previous = schedule({ assistantRequired: false });
+  const imported = schedule({
+    kind: "other",
+    assistantRequired: false,
+    source: "excel",
+  });
+
+  const merged = preserveImportedLectureClassification(imported, previous);
+  assert.equal(merged.kind, "lecture");
+  assert.equal(merged.assistantRequired, false);
+  assert.equal(
+    preserveImportedLectureClassification(imported).kind,
+    "other",
+  );
+});
+
+test("parent lecture availability explains excluded same-date schedules", () => {
+  const main = schedule();
+  assert.equal(
+    parentLectureAvailability(main.date, [main]),
+    "available",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [
+      schedule({ status: "cancelled" }),
+    ]),
+    "cancelled_only",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [schedule({ kind: "other" })]),
+    "non_lecture_only",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [
+      schedule({ status: "cancelled" }),
+      schedule({ id: "other-1", kind: "other" }),
+      schedule({ id: "active-1", status: "pending" }),
+    ]),
+    "available",
+  );
+  assert.equal(
+    parentLectureAvailability(main.date, [main], main.id),
+    "empty",
+  );
+  assert.equal(parentLectureAvailability(main.date, []), "empty");
 });
 
 test("old local lectures default to required and non-lectures cannot require", () => {
