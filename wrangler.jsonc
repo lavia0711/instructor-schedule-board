@@ -3,6 +3,7 @@
   "name": "instructor-schedule-board",
   "compatibility_date": "2026-05-15",
   "compatibility_flags": ["nodejs_compat"],
+  "keep_vars": true,
   "main": "./worker/index.ts",
   "assets": {
     "directory": "dist/client",

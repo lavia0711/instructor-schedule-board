@@ -45,13 +45,15 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
 
 ## Supabase 연결
 
-처음 연결하거나 회사 계정으로 포크해 연결하는 절차는 [Supabase 설정 안내](docs/SUPABASE_SETUP.md)를 따르세요.
+처음 연결하거나 회사의 독립 저장소에 연결하는 절차는 [Supabase 설정 안내](docs/SUPABASE_SETUP.md)를 따르세요.
 
 ```bash
 npx supabase login
 npx supabase link --project-ref YOUR_PROJECT_REF
 npx supabase db push
 ```
+
+개인 포트폴리오 저장소를 회사의 비공개 GitHub 저장소로 독립 복제하고 회사 Supabase·Cloudflare에 연결하는 전체 절차는 [회사 운영 환경 인수 및 배포](docs/COMPANY_DEPLOYMENT.md)를 따르세요.
 
 ## Cloudflare Workers 직접 배포
 
@@ -78,6 +80,7 @@ npm run deploy:dry-run
 ```bash
 npm run lint
 npm test
+npm run handoff:check
 ```
 
 Docker Desktop이 실행 중이면 DB 마이그레이션과 실제 RLS 권한도 검증할 수 있습니다.
